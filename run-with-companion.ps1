@@ -27,6 +27,8 @@ if (Test-Path -LiteralPath (Join-Path $BackendDir "daemon.py")) {
     if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $BackendPython)) {
         $Python = $BackendPython
     } else {
+        & $Python (Join-Path $PSScriptRoot "updater.py") --rollback 2>> `
+            (Join-Path $StateDir "updater.log")
         $BackendDir = $PSScriptRoot
     }
 } else {
@@ -43,40 +45,116 @@ if ($env:RC_BRIDGE_DIR) {
 $env:RC_BRIDGE_DIR = $BridgeDir
 New-Item -ItemType Directory -Force -Path $BridgeDir | Out-Null
 
-$DaemonScript = Join-Path $BackendDir "daemon.py"
-$DaemonArgument = '"' + $DaemonScript.Replace('"', '\"') + '"'
-$Daemon = Start-Process -FilePath $Python -ArgumentList $DaemonArgument `
-    -WorkingDirectory $BackendDir -WindowStyle Hidden -PassThru `
-    -RedirectStandardOutput (Join-Path $StateDir "daemon.log") `
-    -RedirectStandardError (Join-Path $StateDir "daemon-error.log")
-try {
-    $Ready = $false
-    $LockFile = Join-Path $BridgeDir "daemon.lock"
-    for ($Attempt = 0; $Attempt -lt 200; $Attempt++) {
-        if ($Daemon.HasExited) { break }
-        if (Test-Path -LiteralPath $LockFile) {
-            $LockPid = ([System.IO.File]::ReadAllText($LockFile)).Trim()
-            if ($LockPid -eq [string]$Daemon.Id) {
-                $Ready = $true
-                break
-            }
+function Stop-ProcessTree {
+    param([System.Diagnostics.Process]$Process)
+    if ($Process -and -not $Process.HasExited) {
+        & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
+    }
+}
+
+function Start-CompanionDaemon {
+    $daemonScript = Join-Path $BackendDir "daemon.py"
+    $daemonArgument = '"' + $daemonScript.Replace('"', '\"') + '"'
+    return Start-Process -FilePath $Python -ArgumentList $daemonArgument `
+        -WorkingDirectory $BackendDir -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput (Join-Path $StateDir "daemon.log") `
+        -RedirectStandardError (Join-Path $StateDir "daemon-error.log")
+}
+
+function Wait-CompanionDaemon {
+    param([System.Diagnostics.Process]$Process)
+    $lockFile = Join-Path $BridgeDir "daemon.lock"
+    for ($attempt = 0; $attempt -lt 200; $attempt++) {
+        $Process.Refresh()
+        if ($Process.HasExited) { return $false }
+        if (Test-Path -LiteralPath $lockFile) {
+            $lockPid = ([System.IO.File]::ReadAllText($lockFile)).Trim()
+            if ($lockPid -eq [string]$Process.Id) { return $true }
         }
         Start-Sleep -Milliseconds 50
     }
-    if (-not $Ready) {
+    return $false
+}
+
+function ConvertTo-NativeArgument {
+    param([string]$Argument)
+    if ($Argument.Length -gt 0 -and $Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq [char]92) {
+            $backslashes++
+        } elseif ($character -eq [char]34) {
+            [void]$builder.Append((('\' * (2 * $backslashes + 1)) -join ''))
+            [void]$builder.Append('"')
+            $backslashes = 0
+        } else {
+            [void]$builder.Append((('\' * $backslashes) -join ''))
+            [void]$builder.Append($character)
+            $backslashes = 0
+        }
+    }
+    [void]$builder.Append((('\' * (2 * $backslashes)) -join ''))
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+$Daemon = Start-CompanionDaemon
+$Game = $null
+try {
+    if (-not (Wait-CompanionDaemon $Daemon)) {
+        & $Python (Join-Path $PSScriptRoot "updater.py") --rollback 2>> `
+            (Join-Path $StateDir "updater.log")
         throw "Companion daemon did not start. Check $StateDir."
     }
+    & $Python (Join-Path $PSScriptRoot "updater.py") --confirm 2>> `
+        (Join-Path $StateDir "updater.log")
 
     $Executable = $GameCommand[0]
     $Arguments = @()
     if ($GameCommand.Count -gt 1) {
         $Arguments = $GameCommand[1..($GameCommand.Count - 1)]
     }
-    & $Executable @Arguments
-    $GameStatus = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+    $GameInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $GameInfo.FileName = $Executable
+    $GameInfo.UseShellExecute = $false
+    if ($GameInfo.PSObject.Properties.Name -contains "ArgumentList") {
+        foreach ($Argument in $Arguments) { [void]$GameInfo.ArgumentList.Add($Argument) }
+    } else {
+        $GameInfo.Arguments = (($Arguments | ForEach-Object {
+            ConvertTo-NativeArgument $_
+        }) -join ' ')
+    }
+    $Game = [System.Diagnostics.Process]::Start($GameInfo)
+
+    while (-not $Game.HasExited) {
+        if ($Daemon) {
+            $Daemon.Refresh()
+            if ($Daemon.HasExited) {
+                $Daemon.WaitForExit()
+                $Daemon = Start-CompanionDaemon
+                if (Wait-CompanionDaemon $Daemon) {
+                    & $Python (Join-Path $PSScriptRoot "updater.py") --confirm `
+                        2>> (Join-Path $StateDir "updater.log")
+                } else {
+                    Write-Warning "Companion daemon could not restart; check $StateDir."
+                    Stop-ProcessTree $Daemon
+                    $Daemon = $null
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 250
+        $Game.Refresh()
+    }
+    $Game.WaitForExit()
+    $GameStatus = $Game.ExitCode
 } finally {
-    if ($Daemon -and -not $Daemon.HasExited) {
-        & taskkill.exe /PID $Daemon.Id /T /F 2>$null | Out-Null
+    Stop-ProcessTree $Daemon
+    if ($Game -and -not $Game.HasExited) {
+        Stop-ProcessTree $Game
     }
 }
 exit $GameStatus

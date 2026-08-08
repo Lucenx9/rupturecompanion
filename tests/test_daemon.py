@@ -161,3 +161,12 @@ def test_cancellation_must_match_sequence_and_session(tmp_path, monkeypatch):
     assert daemon.cancellation_requested(12, "session-a")
     assert not daemon.cancellation_requested(11, "session-a")
     assert not daemon.cancellation_requested(12, "session-b")
+
+
+def test_answer_identity_matches_session_aware_protocol(tmp_path, monkeypatch):
+    monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
+    (tmp_path / "answer.txt").write_text(
+        "v1|12|session-a|ok\nAnswer\n__RC_END__\n", encoding="utf-8"
+    )
+
+    assert daemon.read_answer_identity() == (12, "session-a")

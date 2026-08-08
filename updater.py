@@ -11,7 +11,16 @@ RELEASE_URL = (
     "https://github.com/Lucenx9/rupturecompanion/releases/latest/download/"
     "RuptureCompanion-Backend.tar.gz"
 )
-REQUIRED_FILES = ("daemon.py", "ai_backend.py", "screenshot.py", "VERSION")
+REQUIRED_FILES = (
+    "daemon.py",
+    "ai_backend.py",
+    "screenshot.py",
+    "updater.py",
+    "VERSION",
+)
+MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
+MAX_EXTRACTED_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 64
 
 
 class UpdateError(Exception):
@@ -23,23 +32,37 @@ def extract_backend(archive_path: Path, destination: Path) -> None:
     root = destination.resolve()
     try:
         with tarfile.open(archive_path, "r:gz") as archive:
-            for member in archive.getmembers():
-                name = PurePosixPath(member.name)
-                target = (destination / Path(*name.parts)).resolve()
+            members = archive.getmembers()
+            if len(members) > MAX_ARCHIVE_MEMBERS:
+                raise UpdateError("backend archive contains too many files")
+            total_size = 0
+            for member in members:
+                member_path = PurePosixPath(member.name)
+                target = (destination / Path(*member_path.parts)).resolve()
+                total_size += member.size
                 if (
-                    name.is_absolute()
-                    or ".." in name.parts
+                    member_path.is_absolute()
+                    or ".." in member_path.parts
                     or not target.is_relative_to(root)
                     or not (member.isfile() or member.isdir())
                 ):
                     raise UpdateError(f"unsafe archive entry: {member.name}")
+            if total_size > MAX_EXTRACTED_BYTES:
+                raise UpdateError("backend archive is too large")
             archive.extractall(destination, filter="data")
         missing = [
             name for name in REQUIRED_FILES if not (destination / name).is_file()
         ]
         if missing:
             raise UpdateError(f"incomplete backend archive: {', '.join(missing)}")
-    except (OSError, tarfile.TarError):
+        for name in REQUIRED_FILES:
+            if name.endswith(".py"):
+                try:
+                    source = (destination / name).read_text(encoding="utf-8")
+                    compile(source, name, "exec")
+                except (OSError, SyntaxError, UnicodeError) as error:
+                    raise UpdateError(f"invalid Python file: {name}") from error
+    except (OSError, tarfile.TarError, UpdateError):
         shutil.rmtree(destination, ignore_errors=True)
         raise
 
@@ -55,8 +78,16 @@ def _download(archive_path: Path, etag_path: Path) -> str | None:
     request = urllib.request.Request(RELEASE_URL, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None and int(content_length) > MAX_ARCHIVE_BYTES:
+                raise UpdateError("backend download is too large")
+            downloaded = 0
             with archive_path.open("wb") as output:
-                shutil.copyfileobj(response, output)
+                while chunk := response.read(1024 * 1024):
+                    downloaded += len(chunk)
+                    if downloaded > MAX_ARCHIVE_BYTES:
+                        raise UpdateError("backend download is too large")
+                    output.write(chunk)
             return response.headers.get("ETag") or ""
     except urllib.error.HTTPError as error:
         if error.code == 304:
@@ -90,9 +121,21 @@ def update_backend(data_dir: Path) -> Path | None:
             if previous.is_dir() and not installed.exists():
                 previous.replace(installed)
             raise
-        shutil.rmtree(previous, ignore_errors=True)
         etag_path.write_text(etag, encoding="utf-8")
     return installed
+
+
+def confirm_backend(data_dir: Path) -> None:
+    shutil.rmtree(data_dir / "backend.previous", ignore_errors=True)
+
+
+def rollback_backend(data_dir: Path) -> None:
+    installed = data_dir / "backend"
+    previous = data_dir / "backend.previous"
+    shutil.rmtree(installed, ignore_errors=True)
+    if previous.is_dir():
+        previous.replace(installed)
+    (data_dir / "backend.etag").unlink(missing_ok=True)
 
 
 def default_data_dir() -> Path:
@@ -107,7 +150,13 @@ def default_data_dir() -> Path:
 
 def main() -> None:
     try:
-        update_backend(default_data_dir())
+        data_dir = default_data_dir()
+        if "--confirm" in sys.argv[1:]:
+            confirm_backend(data_dir)
+        elif "--rollback" in sys.argv[1:]:
+            rollback_backend(data_dir)
+        else:
+            update_backend(data_dir)
     except (OSError, UpdateError, urllib.error.URLError) as error:
         print(f"Rupture Companion update skipped: {error}", file=sys.stderr)
 

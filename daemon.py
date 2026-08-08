@@ -230,6 +230,23 @@ def read_request() -> str:
         return ""
 
 
+def read_answer_identity() -> tuple[int, str] | None:
+    try:
+        header = (
+            (bridge_dir() / "answer.txt").read_text(encoding="utf-8").splitlines()[0]
+        )
+    except (OSError, UnicodeDecodeError, IndexError):
+        return None
+    fields = header.split("|")
+    if len(fields) != 4 or fields[0] != "v1" or fields[3] not in {"ok", "error"}:
+        return None
+    try:
+        sequence = int(fields[1])
+    except ValueError:
+        return None
+    return sequence, fields[2]
+
+
 def process_request(
     request: tuple[int, str, str, str], conversation: Conversation
 ) -> bool:
@@ -266,10 +283,13 @@ def main() -> None:
         raise SystemExit(1) from error
     conversation = Conversation()
     initial_request = parse_request(read_request())
-    seen_request = (
+    initial_identity = (
         (initial_request[0], initial_request[1])
         if initial_request is not None
         else None
+    )
+    seen_request = (
+        initial_identity if initial_identity == read_answer_identity() else None
     )
     print(f"Rupture Companion daemon watching {bridge_dir()}")
     try:

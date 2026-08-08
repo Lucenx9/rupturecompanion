@@ -33,6 +33,8 @@ if [[ -f "$data_dir/backend/daemon.py" ]]; then
                 >>"$log_file" 2>&1; then
         backend_dir="$data_dir/backend"
         python="$backend_dir/.venv/bin/python"
+    else
+        "$python" "$companion_dir/updater.py" --rollback 2>>"$log_file" || true
     fi
 fi
 
@@ -84,11 +86,6 @@ stop_daemon() {
         kill -TERM -- "-$daemon_pid" 2>/dev/null || true
     fi
     wait "$daemon_pid" 2>/dev/null || true
-    failed_daemon_pid="$daemon_pid"
-    if kill -0 -- "-$failed_daemon_pid" 2>/dev/null; then
-        kill -TERM -- "-$failed_daemon_pid" 2>/dev/null || true
-    fi
-    wait "$failed_daemon_pid" 2>/dev/null || true
     daemon_pid=""
 }
 
@@ -107,9 +104,11 @@ trap 'if [[ -n "$game_pid" ]]; then kill -TERM "$game_pid" 2>/dev/null || true; 
 
 start_daemon
 if ! wait_for_daemon; then
+    "$python" "$companion_dir/updater.py" --rollback 2>>"$log_file" || true
     echo "Companion daemon did not start; check $log_file" >&2
     exit 1
 fi
+"$python" "$companion_dir/updater.py" --confirm 2>>"$log_file" || true
 
 "$@" &
 game_pid=$!
@@ -122,15 +121,22 @@ while true; do
         game_status=$completed_status
         break
     fi
+    failed_daemon_pid="$daemon_pid"
+    if kill -0 -- "-$failed_daemon_pid" 2>/dev/null; then
+        kill -TERM -- "-$failed_daemon_pid" 2>/dev/null || true
+    fi
+    wait "$failed_daemon_pid" 2>/dev/null || true
     daemon_pid=""
     echo "Daemon stopped unexpectedly; restarting" >>"$log_file"
     start_daemon
     if ! wait_for_daemon; then
+        "$python" "$companion_dir/updater.py" --rollback 2>>"$log_file" || true
         echo "Companion daemon is unavailable; check $log_file" >&2
         wait "$game_pid"
         game_status=$?
         break
     fi
+    "$python" "$companion_dir/updater.py" --confirm 2>>"$log_file" || true
 done
 game_pid=""
 exit "$game_status"
