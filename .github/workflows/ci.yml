@@ -12,8 +12,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
       - run: uv sync --locked --group dev
       - run: uv run pytest -q
       - run: uv run ruff check .
@@ -42,18 +42,18 @@ jobs:
   plugin:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: AlienXAXS/StarRupture-Plugin-SDK
-          ref: v1.17.3
+          ref: a3f37a6638be19d0a40fdaba117b03558b20c720
           path: plugin-sdk
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: AlienXAXS/StarRupture-Game-SDK
           ref: 2c7d138506e42011d1ccf4ee044339c154b45b90
           path: game-sdk
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
       - name: Build current interface
         shell: pwsh
         run: |
@@ -68,7 +68,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force legacy-sdk\include | Out-Null
           Invoke-WebRequest `
-            -Uri "https://raw.githubusercontent.com/AlienXAXS/StarRupture-ModLoader/v1.15.6/StarRupture-ModLoader-Core/plugins/plugin_interface.h" `
+            -Uri "https://raw.githubusercontent.com/AlienXAXS/StarRupture-ModLoader/b3fa2fae7b9b48f7c7bf98ceeb1ab83ef2f0f59d/StarRupture-ModLoader-Core/plugins/plugin_interface.h" `
             -OutFile legacy-sdk\include\plugin_interface.h
       - name: Build legacy interface
         shell: pwsh

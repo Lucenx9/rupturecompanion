@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -64,6 +65,7 @@ std::mutex g_snapshotMutex;
 std::string g_snapshot;
 bool g_registered = false;
 std::atomic<DWORD> g_gameThreadId{0};
+HANDLE g_cleanupEvent = nullptr;
 
 bool CompatibleGameBuild()
 {
@@ -1135,10 +1137,12 @@ std::string BuildTarget(
         baseController != nullptr && baseController->IsA(SDK::ACrPlayerControllerBase::StaticClass())
         ? static_cast<SDK::ACrPlayerControllerBase*>(baseController)
         : nullptr;
-    SDK::AActor* target = controller == nullptr ? nullptr : controller->GetCurrentInteractable();
+    SDK::AActor* target = controller == nullptr
+        ? nullptr
+        : controller->CurrentInteractableActorWithActiveInteraction;
     if (target == nullptr && controller != nullptr)
     {
-        target = controller->CurrentInteractableActorWithActiveInteraction;
+        target = controller->GetCurrentInteractable();
     }
     if (target == nullptr && controller != nullptr)
     {
@@ -1312,6 +1316,10 @@ std::string Capture(SDK::UWorld* world)
         return BuildUnavailableSnapshot("local_player_unavailable");
     }
     auto* player = static_cast<SDK::ACrCharacterPlayerBase*>(pawn);
+    if (!player->bCharacterSelectedAndInitialized)
+    {
+        return BuildUnavailableSnapshot("local_player_initializing");
+    }
     SDK::AGameStateBase* baseGameState = SDK::UGameplayStatics::GetGameState(world);
     SDK::ACrGameStateBase* gameState =
         baseGameState != nullptr && baseGameState->IsA(SDK::ACrGameStateBase::StaticClass())
@@ -1448,7 +1456,8 @@ std::string Capture(SDK::UWorld* world)
 
     Fields snapshotStatus;
     Add(snapshotStatus, "available", "true");
-    Add(snapshotStatus, "partial", JsonBoolean(!missing.empty()));
+    Add(snapshotStatus, "partial", JsonBoolean(
+            !missing.empty() || !truncatedSections.empty()));
     Add(snapshotStatus, "missing_sections", JsonArray(missing));
     Add(snapshotStatus, "truncated_sections", JsonArray(truncatedSections));
 
@@ -1519,38 +1528,23 @@ void StoreSnapshot(std::string snapshot)
 
 SDK::UWorld* RecoverCurrentWorld()
 {
-    if (g_self == nullptr || g_self->hooks == nullptr
-        || g_self->hooks->ObjectWalker == nullptr)
-    {
-        return nullptr;
-    }
-    IPluginObjectWalker* walker = g_self->hooks->ObjectWalker;
-    if (!walker->IsReady())
-    {
-        return nullptr;
-    }
-    PluginObjectInfo worlds[32]{};
-    const int matches = walker->FindObjectsByClassNameInto(
-        "World", PluginObjectLookup_InstanceOnly, worlds, static_cast<int>(std::size(worlds)));
-    const int count = std::clamp(matches, 0, static_cast<int>(std::size(worlds)));
-    for (int index = 0; index < count; ++index)
-    {
-        auto* world = static_cast<SDK::UWorld*>(worlds[index].object);
-        if (world == nullptr)
-        {
-            continue;
-        }
-        SDK::APawn* pawn = SDK::UGameplayStatics::GetPlayerPawn(world, 0);
-        if (pawn != nullptr && pawn->IsA(SDK::ACrCharacterPlayerBase::StaticClass()))
-        {
-            return world;
-        }
-    }
-    return nullptr;
+    SDK::UWorld* world = SDK::UWorld::GetWorld();
+    SDK::APawn* pawn = world == nullptr
+        ? nullptr
+        : SDK::UGameplayStatics::GetPlayerPawn(world, 0);
+    return pawn != nullptr && pawn->IsA(SDK::ACrCharacterPlayerBase::StaticClass())
+        ? world
+        : nullptr;
+}
+
+void RecordGameThread(void*)
+{
+    g_gameThreadId.store(GetCurrentThreadId(), std::memory_order_release);
 }
 
 void OnWorldBeginPlay(SDK::UWorld* world)
 {
+    RecordGameThread(nullptr);
     g_world = world;
     g_nextSampleAt = SteadyClock::now();
     StoreSnapshot(BuildUnavailableSnapshot("waiting_for_local_player"));
@@ -1558,6 +1552,7 @@ void OnWorldBeginPlay(SDK::UWorld* world)
 
 void OnWorldEndPlay(SDK::UWorld* world, const char*)
 {
+    RecordGameThread(nullptr);
     if (world == g_world)
     {
         g_world = nullptr;
@@ -1603,12 +1598,7 @@ void OnEngineTick(const float)
     }
 }
 
-struct GameThreadCleanup
-{
-    volatile LONG completed = 0;
-};
-
-void UnregisterOnGameThread(void* context)
+void UnregisterOnGameThread(void*)
 {
     if (g_registered && g_self != nullptr && g_self->hooks != nullptr)
     {
@@ -1623,11 +1613,6 @@ void UnregisterOnGameThread(void* context)
         }
         g_registered = false;
         g_world = nullptr;
-    }
-    if (context != nullptr)
-    {
-        auto* cleanup = static_cast<GameThreadCleanup*>(context);
-        InterlockedExchange(&cleanup->completed, 1);
     }
 }
 } // namespace
@@ -1651,6 +1636,13 @@ bool Initialize(IPluginSelf* self)
     {
         return false;
     }
+    g_cleanupEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (g_cleanupEvent == nullptr)
+    {
+        return false;
+    }
+    // Queue this before any later UI/console reload request can be drained.
+    self->hooks->Engine->PostToGameThread(&RecordGameThread, nullptr);
     self->hooks->Engine->RegisterOnTick(&OnEngineTick);
     self->hooks->World->RegisterOnWorldBeginPlay(&OnWorldBeginPlay);
     self->hooks->World->RegisterOnBeforeWorldEndPlay(&OnWorldEndPlay);
@@ -1671,22 +1663,27 @@ void Shutdown()
         }
         else
         {
-            GameThreadCleanup cleanup;
-            g_self->hooks->Engine->PostToGameThread(&UnregisterOnGameThread, &cleanup);
-            // This second callback is exported by KernelBase, not this DLL. It
-            // wakes us only after the plugin cleanup callback has returned.
+            ResetEvent(g_cleanupEvent);
+            g_self->hooks->Engine->PostToGameThread(&UnregisterOnGameThread, nullptr);
+            // This second queued callback lives in KernelBase, not this DLL.
+            // The event fires only after the plugin cleanup callback returned.
+            static_assert(sizeof(&SetEvent) == sizeof(PluginGameThreadCallback));
+            // StarRupture and the plugin are x64-only. On the Win64 ABI these
+            // functions have the same one-pointer call; the BOOL return is ignored.
+            const auto signalEvent = std::bit_cast<PluginGameThreadCallback>(&SetEvent);
             g_self->hooks->Engine->PostToGameThread(
-                &WakeByAddressSingle, const_cast<LONG*>(&cleanup.completed));
-            LONG pending = 0;
-            while (InterlockedCompareExchange(&cleanup.completed, 1, 1) == 0)
-            {
-                WaitOnAddress(&cleanup.completed, &pending, sizeof(pending), INFINITE);
-            }
+                signalEvent, g_cleanupEvent);
+            WaitForSingleObject(g_cleanupEvent, INFINITE);
         }
     }
     g_registered = false;
     g_world = nullptr;
     g_gameThreadId.store(0, std::memory_order_release);
+    if (g_cleanupEvent != nullptr)
+    {
+        CloseHandle(g_cleanupEvent);
+        g_cleanupEvent = nullptr;
+    }
     g_self = nullptr;
     StoreSnapshot(BuildUnavailableSnapshot("plugin_stopped"));
 }

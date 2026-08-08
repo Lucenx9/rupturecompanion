@@ -144,7 +144,7 @@ def acquire_lock(identity: str | None = None) -> TextIO:
 
 
 def _validated_live_context(raw: str) -> str | None:
-    return ai_backend.validate_live_context(raw)
+    return ai_backend.validate_live_context(raw, max_input_bytes=MAX_LIVE_CONTEXT_BYTES)
 
 
 def _protocol_lines(text: str) -> list[str]:
@@ -160,14 +160,10 @@ def normalize_context(context: str) -> str:
         index for index, line in enumerate(lines) if line == LIVE_CONTEXT_MARKER
     ]
     if not marker_indexes:
-        return (
-            context.strip() if len(context.encode("utf-8")) <= MAX_CONTEXT_BYTES else ""
-        )
+        return ai_backend.normalize_session_metadata(context)
     first_marker = marker_indexes[0]
-    metadata = "\n".join(lines[:first_marker]).strip()
-    safe_metadata = (
-        metadata if len(metadata.encode("utf-8")) <= MAX_CONTEXT_BYTES else ""
-    )
+    metadata = ai_backend.normalize_session_metadata("\n".join(lines[:first_marker]))
+    safe_metadata = metadata
     if len(marker_indexes) != 1 or first_marker + 2 != len(lines):
         return safe_metadata
     live_context = _validated_live_context(lines[first_marker + 1])
