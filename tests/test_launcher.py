@@ -15,6 +15,17 @@ def make_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
+def prepare_fake_windows_backend_runtime(backend: Path, tmp_path: Path) -> str:
+    scripts = backend / ".venv/Scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy2(ROOT / ".venv/Scripts/python.exe", scripts)
+    shutil.copy2(ROOT / ".venv/pyvenv.cfg", backend / ".venv")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "uv.cmd").write_text("@exit /b 0\r\n", encoding="utf-8")
+    return f"{tools}{os.pathsep}{os.environ['PATH']}"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Bash launcher is Linux-only")
 @pytest.mark.parametrize("supports_ready_protocol", [True, False])
 def test_launcher_waits_for_daemon_readiness_before_starting_game(
@@ -122,10 +133,12 @@ def test_powershell_launcher_waits_for_migration(tmp_path, supports_ready_protoc
     )
     if supports_ready_protocol:
         shutil.copy2(ROOT / "daemon-capabilities.json", backend)
+    windows_path = prepare_fake_windows_backend_runtime(backend, tmp_path)
     migration_file = tmp_path / "migration-complete"
     env = os.environ | {
         "LOCALAPPDATA": str(local_app_data),
         "MIGRATION_FILE": str(migration_file),
+        "PATH": windows_path,
         "RC_AUTO_UPDATE": "0",
         "RC_BRIDGE_DIR": str(tmp_path / "bridge"),
     }
@@ -165,6 +178,7 @@ def test_powershell_launcher_refreshes_nonce_when_daemon_restarts(tmp_path):
     shutil.copy2(ROOT / "pyproject.toml", backend)
     shutil.copy2(ROOT / "uv.lock", backend)
     shutil.copy2(ROOT / "daemon-capabilities.json", backend)
+    windows_path = prepare_fake_windows_backend_runtime(backend, tmp_path)
     (backend / "daemon.py").write_text(
         "import os\n"
         "import time\n"
@@ -197,6 +211,7 @@ def test_powershell_launcher_refreshes_nonce_when_daemon_restarts(tmp_path):
         "ATTEMPTS_FILE": str(tmp_path / "attempts.txt"),
         "LOCALAPPDATA": str(local_app_data),
         "NONCES_FILE": str(nonces),
+        "PATH": windows_path,
         "RC_AUTO_UPDATE": "0",
         "RC_BRIDGE_DIR": str(tmp_path / "bridge"),
     }
