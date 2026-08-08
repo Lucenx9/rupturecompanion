@@ -171,6 +171,21 @@ def _migration_lock(plugin_dir: Path) -> Iterator[None]:
         lock.close()
 
 
+def _recover_pending_plugin(
+    dll: Path,
+    sidecar: Path,
+    rollback_dll: Path,
+    manifest_url: str,
+) -> str:
+    installed_manifest = _installed_manifest(sidecar)
+    if rollback_dll.is_file():
+        if dll.is_file() and installed_manifest == manifest_url:
+            rollback_dll.unlink()
+        elif installed_manifest != manifest_url:
+            os.replace(rollback_dll, dll)
+    return installed_manifest
+
+
 def _sync_plugin_locked(
     modloader_dir: Path,
     plugin_dir: Path,
@@ -189,18 +204,28 @@ def _sync_plugin_locked(
     dll = plugin_dir / "RuptureCompanion.dll"
     sidecar = plugin_dir / "RuptureCompanion.json"
     rollback_dll = plugin_dir / "RuptureCompanion.dll.rollback"
-    installed_manifest = _installed_manifest(sidecar)
-    if rollback_dll.is_file():
-        if installed_manifest == variant.manifest_url:
-            rollback_dll.unlink()
-        else:
-            os.replace(rollback_dll, dll)
-    if dll.is_file() and installed_manifest == variant.manifest_url:
-        return None
+    commit_context = commit_lock if commit_lock is not None else nullcontext()
+    with commit_context:
+        if cancel_event is not None and cancel_event.is_set():
+            raise PluginUpdateError("plugin migration deferred")
+        installed_manifest = _recover_pending_plugin(
+            dll,
+            sidecar,
+            rollback_dll,
+            variant.manifest_url,
+        )
+        if cancel_event is not None and cancel_event.is_set():
+            raise PluginUpdateError("plugin migration deferred")
+        if dll.is_file() and installed_manifest == variant.manifest_url:
+            return None
 
     temporary_dll = _temporary_path(plugin_dir, ".dll.update")
     temporary_sidecar = _temporary_path(plugin_dir, ".json.update")
-    backup_dll = _temporary_path(plugin_dir, ".dll.backup") if dll.is_file() else None
+    backup_dll = (
+        _temporary_path(plugin_dir, ".dll.backup")
+        if dll.is_file() and not rollback_dll.is_file()
+        else None
+    )
     try:
         download_plugin(variant.dll_url, temporary_dll)
         temporary_sidecar.write_text(
@@ -230,6 +255,35 @@ def _sync_plugin_locked(
         if backup_dll is not None:
             backup_dll.unlink(missing_ok=True)
     return variant.name
+
+
+def recover_plugin(
+    bridge: Path,
+    *,
+    commit_lock: threading.Lock | None = None,
+) -> None:
+    modloader_dir = bridge.parent / "ModLoader"
+    plugin_dir = modloader_dir / "Plugins"
+    if not plugin_dir.is_dir():
+        return
+    with _migration_lock(plugin_dir):
+        interface_range = _latest_interface(modloader_dir / "Logs")
+        variant = (
+            _select_variant(*interface_range) if interface_range is not None else None
+        )
+        if variant is None:
+            return
+        dll = plugin_dir / "RuptureCompanion.dll"
+        sidecar = plugin_dir / "RuptureCompanion.json"
+        rollback_dll = plugin_dir / "RuptureCompanion.dll.rollback"
+        commit_context = commit_lock if commit_lock is not None else nullcontext()
+        with commit_context:
+            _recover_pending_plugin(
+                dll,
+                sidecar,
+                rollback_dll,
+                variant.manifest_url,
+            )
 
 
 def sync_plugin(

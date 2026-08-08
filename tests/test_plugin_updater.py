@@ -79,7 +79,8 @@ def make_installer_recovery_state(
     rollback = plugin_dir / "RuptureCompanion.dll.rollback"
     dll.write_bytes(installed_dll)
     sidecar.write_text(
-        json.dumps({"manifest_url": installed_manifest}), encoding="utf-8"
+        json.dumps({"manifest_url": installed_manifest}, separators=(",", ":")),
+        encoding="utf-8",
     )
     rollback.write_bytes(b"MZlegacy")
     return game_root, dll, rollback
@@ -177,6 +178,25 @@ def test_sync_plugin_cancellation_keeps_existing_pair(tmp_path, monkeypatch):
     assert dll.read_bytes() == b"MZlegacy"
     assert sidecar.read_text(encoding="utf-8") == original_sidecar
     assert not (plugin_dir / "RuptureCompanion.dll.rollback").exists()
+
+
+def test_recover_plugin_restores_pending_rollback_before_migration(tmp_path):
+    bridge = make_modloader_install(tmp_path, "loader supports [60, 60]\n")
+    plugin_dir = bridge.parent / "ModLoader/Plugins"
+    dll = plugin_dir / "RuptureCompanion.dll"
+    sidecar = plugin_dir / "RuptureCompanion.json"
+    rollback = plugin_dir / "RuptureCompanion.dll.rollback"
+    dll.write_bytes(b"MZinterrupted")
+    sidecar.write_text(
+        json.dumps({"manifest_url": plugin_updater.LEGACY_MANIFEST_URL}),
+        encoding="utf-8",
+    )
+    rollback.write_bytes(b"MZlegacy")
+
+    plugin_updater.recover_plugin(bridge)
+
+    assert dll.read_bytes() == b"MZlegacy"
+    assert not rollback.exists()
 
 
 def test_sync_plugin_rolls_back_dll_when_sidecar_commit_fails(tmp_path, monkeypatch):
@@ -372,6 +392,11 @@ def test_daemon_defers_slow_migration_for_legacy_launcher(tmp_path, monkeypatch)
     monkeypatch.delenv("RC_DAEMON_READY_PROTOCOL", raising=False)
     monkeypatch.setattr(daemon, "bridge_dir", lambda: bridge)
     monkeypatch.setattr(daemon, "LEGACY_MIGRATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(
+        daemon.plugin_updater,
+        "recover_plugin",
+        lambda _bridge, **_kwargs: events.append("recover"),
+    )
 
     class FakeLock:
         def close(self):
@@ -381,6 +406,7 @@ def test_daemon_defers_slow_migration_for_legacy_launcher(tmp_path, monkeypatch)
         events.append("sync")
         assert cancel_event.wait(timeout=1)
         with commit_lock:
+            events.append("cancelled" if cancel_event.is_set() else "mutated")
             migration_cancelled.set()
 
     monkeypatch.setattr(daemon.plugin_updater, "sync_plugin", slow_sync)
@@ -398,7 +424,10 @@ def test_daemon_defers_slow_migration_for_legacy_launcher(tmp_path, monkeypatch)
     daemon.main()
 
     assert migration_cancelled.wait(timeout=1)
-    assert events[0] == "sync"
+    assert daemon.LEGACY_MIGRATION_GRACE_SECONDS < 10
+    assert events[:2] == ["recover", "sync"]
+    assert "cancelled" in events
+    assert "mutated" not in events
     assert "lock" in events
     assert "close" in events
 

@@ -42,7 +42,15 @@ if [[ -f "$data_dir/backend/daemon.py" ]]; then
 fi
 daemon_ready_protocol=0
 daemon_ready_nonce=""
-if grep -Fq 'READY_PROTOCOL_VERSION = 1' "$backend_dir/daemon.py"; then
+capabilities_file="$backend_dir/daemon-capabilities.json"
+ready_protocol="$("$python" -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as capabilities:
+    print(json.load(capabilities).get("ready_protocol", 0))
+' "$capabilities_file" 2>/dev/null || true)"
+if [[ "$ready_protocol" == 1 ]]; then
     daemon_ready_protocol=1
     daemon_ready_nonce="$$-$RANDOM-$RANDOM-$(date +%s%N)"
 fi

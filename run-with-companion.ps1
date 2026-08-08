@@ -36,9 +36,14 @@ if (Test-Path -LiteralPath (Join-Path $BackendDir "daemon.py")) {
     $BackendDir = $PSScriptRoot
 }
 $DaemonReadyProtocol = 0
-if (Select-String -LiteralPath (Join-Path $BackendDir "daemon.py") `
-    -SimpleMatch "READY_PROTOCOL_VERSION = 1" -Quiet) {
-    $DaemonReadyProtocol = 1
+try {
+    $Capabilities = [System.IO.File]::ReadAllText(
+        (Join-Path $BackendDir "daemon-capabilities.json")
+    ) | ConvertFrom-Json
+    if ($Capabilities.ready_protocol -eq 1) {
+        $DaemonReadyProtocol = 1
+    }
+} catch {
 }
 $DaemonReadyNonce = if ($DaemonReadyProtocol -eq 1) {
     [guid]::NewGuid().ToString("N")
