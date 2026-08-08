@@ -26,6 +26,30 @@ def prepare_fake_windows_backend_runtime(backend: Path, tmp_path: Path) -> str:
     return f"{tools}{os.pathsep}{os.environ['PATH']}"
 
 
+def run_windows_launcher(
+    command: list[str], env: dict[str, str], tmp_path: Path, timeout: float
+) -> tuple[int, str]:
+    log_path = tmp_path / "powershell-launcher.log"
+    timed_out = False
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(command, env=env, stdout=log, stderr=log)
+        try:
+            return_code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            subprocess.run(
+                ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return_code = process.wait(timeout=5)
+    log_text = log_path.read_bytes().decode(errors="replace")
+    if timed_out:
+        pytest.fail(f"PowerShell launcher timed out after {timeout}s:\n{log_text}")
+    return return_code, log_text
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Bash launcher is Linux-only")
 @pytest.mark.parametrize("supports_ready_protocol", [True, False])
 def test_launcher_waits_for_daemon_readiness_before_starting_game(
@@ -143,7 +167,7 @@ def test_powershell_launcher_waits_for_migration(tmp_path, supports_ready_protoc
         "RC_BRIDGE_DIR": str(tmp_path / "bridge"),
     }
 
-    result = subprocess.run(
+    return_code, launcher_log = run_windows_launcher(
         [
             "powershell.exe",
             "-NoProfile",
@@ -156,14 +180,12 @@ def test_powershell_launcher_waits_for_migration(tmp_path, supports_ready_protoc
             "/c",
             "exit 7",
         ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=30,
+        env,
+        tmp_path,
+        30,
     )
 
-    assert result.returncode == 7, result.stderr
+    assert return_code == 7, launcher_log
     assert migration_file.read_text(encoding="utf-8") == "migrated"
     assert (
         "|" in (tmp_path / "bridge/daemon.lock").read_text(encoding="utf-8")
@@ -216,7 +238,7 @@ def test_powershell_launcher_refreshes_nonce_when_daemon_restarts(tmp_path):
         "RC_BRIDGE_DIR": str(tmp_path / "bridge"),
     }
 
-    result = subprocess.run(
+    return_code, launcher_log = run_windows_launcher(
         [
             "powershell.exe",
             "-NoProfile",
@@ -229,14 +251,12 @@ def test_powershell_launcher_refreshes_nonce_when_daemon_restarts(tmp_path):
             "/c",
             str(game),
         ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=30,
+        env,
+        tmp_path,
+        30,
     )
 
-    assert result.returncode == 7, result.stderr
+    assert return_code == 7, launcher_log
     launched_nonces = nonces.read_text(encoding="utf-8").splitlines()
     assert len(launched_nonces) >= 2
     assert launched_nonces[0] != launched_nonces[1]
@@ -267,7 +287,7 @@ def test_powershell_launcher_rolls_back_backend_when_uv_is_missing(tmp_path):
         "RC_BRIDGE_DIR": str(tmp_path / "bridge"),
     }
 
-    result = subprocess.run(
+    return_code, launcher_log = run_windows_launcher(
         [
             powershell,
             "-NoProfile",
@@ -280,12 +300,10 @@ def test_powershell_launcher_rolls_back_backend_when_uv_is_missing(tmp_path):
             "/c",
             "exit 7",
         ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=30,
+        env,
+        tmp_path,
+        30,
     )
 
-    assert result.returncode == 7, result.stderr
+    assert return_code == 7, launcher_log
     assert not backend.exists()
