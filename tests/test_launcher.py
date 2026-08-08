@@ -16,10 +16,20 @@ def make_executable(path: Path, content: str) -> None:
 
 
 def prepare_windows_python_runtime(project: Path) -> None:
-    scripts = project / ".venv/Scripts"
-    scripts.mkdir(parents=True)
-    shutil.copy2(ROOT / ".venv/Scripts/python.exe", scripts)
-    shutil.copy2(ROOT / ".venv/pyvenv.cfg", project / ".venv")
+    subprocess.run(
+        [
+            "cmd.exe",
+            "/d",
+            "/c",
+            "mklink",
+            "/J",
+            str(project / ".venv"),
+            str(ROOT / ".venv"),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def prepare_fake_windows_backend_runtime(backend: Path, tmp_path: Path) -> str:
