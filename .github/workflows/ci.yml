@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --group dev
+      - run: uv run pytest -q
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - if: runner.os == 'Linux'
+        run: shellcheck run-with-companion.sh install-plugin.sh
+      - if: runner.os == 'Windows'
+        name: Parse PowerShell launch and install scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($path in 'run-with-companion.ps1', 'install-plugin.ps1') {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path), [ref]$tokens, [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
+  plugin:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: AlienXAXS/StarRupture-Plugin-SDK
+          ref: v1.17.3
+          path: plugin-sdk
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build current interface
+        shell: pwsh
+        run: |
+          msbuild RuptureCompanion.sln `
+            /p:Configuration="Client Release" `
+            /p:Platform=x64 `
+            /p:PluginSDKInclude="${{ github.workspace }}\plugin-sdk\include" `
+            /m /v:minimal
+      - name: Download legacy v47 interface
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force legacy-sdk\include | Out-Null
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/AlienXAXS/StarRupture-ModLoader/v1.15.6/StarRupture-ModLoader-Core/plugins/plugin_interface.h" `
+            -OutFile legacy-sdk\include\plugin_interface.h
+      - name: Build legacy interface
+        shell: pwsh
+        run: |
+          msbuild RuptureCompanion.sln /t:Rebuild `
+            /p:Configuration="Client Release" `
+            /p:Platform=x64 `
+            /p:PluginSDKInclude="${{ github.workspace }}\legacy-sdk\include" `
+            /m /v:minimal
