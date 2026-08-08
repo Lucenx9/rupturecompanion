@@ -13,6 +13,7 @@ else:
     import fcntl
 
 import ai_backend
+import plugin_updater
 import screenshot
 
 REQUEST_PREFIX = "v1|"
@@ -197,7 +198,7 @@ def handle(
             conversation.web_enabled = requested_web_mode
         try:
             with screenshot.capture_for_analysis() as shot:
-                answer = ai_backend.ask(
+                response = ai_backend.ask(
                     question,
                     str(shot),
                     conversation.history,
@@ -211,9 +212,9 @@ def handle(
                 sequence,
                 session_id,
                 question,
-                answer,
+                response.text,
                 False,
-                not ai_backend.response_used_web(answer),
+                not response.used_web,
             )
         except (screenshot.ScreenshotError, ai_backend.AIError) as error:
             pending = PendingAnswer(
@@ -279,6 +280,13 @@ def process_request(
 
 
 def main() -> None:
+    bridge = bridge_dir()
+    try:
+        migrated = plugin_updater.sync_plugin(bridge)
+        if migrated:
+            print(f"Rupture Companion plugin migrated to {migrated}")
+    except (OSError, plugin_updater.PluginUpdateError) as error:
+        print(f"Rupture Companion plugin migration skipped: {error}", file=sys.stderr)
     try:
         lock = acquire_lock()
     except DaemonAlreadyRunning as error:

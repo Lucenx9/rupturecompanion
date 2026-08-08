@@ -33,7 +33,7 @@ else
     latest_log="$(find "$log_dir" -maxdepth 1 -type f -name 'ModLoader*.log' \
         -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)"
     if [[ -n "$latest_log" ]]; then
-        interface_range="$(sed -n 's/.*modloader expects \[\([0-9][0-9]*\), \([0-9][0-9]*\)\].*/\1 \2/p' \
+        interface_range="$(sed -nE 's/.*(modloader expects|loader supports|supported range) \[([0-9]+),[[:space:]]*([0-9]+)\].*/\2 \3/p' \
             "$latest_log" | tail -1)"
         read -r interface_min interface_max <<<"$interface_range" || true
     fi
@@ -48,14 +48,14 @@ fi
 variant=""
 dll_asset=""
 manifest_url=""
-if (( interface_min <= 47 && interface_max >= 47 )); then
-    variant="Legacy v47"
-    dll_asset="RuptureCompanion-Legacy.dll"
-    manifest_url="$release_base/RuptureCompanion-legacy-manifest.json"
-elif (( interface_min <= 60 && interface_max >= 60 )); then
+if (( interface_min <= 60 && interface_max >= 60 )); then
     variant="Current v60"
     dll_asset="RuptureCompanion-Client.dll"
     manifest_url="$release_base/RuptureCompanion-client-manifest.json"
+elif (( interface_min <= 47 && interface_max >= 47 )); then
+    variant="Legacy v47"
+    dll_asset="RuptureCompanion-Legacy.dll"
+    manifest_url="$release_base/RuptureCompanion-legacy-manifest.json"
 else
     echo "Unsupported Mod Loader interface range: [$interface_min, $interface_max]" >&2
     echo "Update Rupture Companion or the StarRupture Mod Loader first." >&2
@@ -63,7 +63,17 @@ else
 fi
 
 temporary="$(mktemp -d "${TMPDIR:-/tmp}/rupture-companion-install.XXXXXX")"
-trap 'rm -rf -- "$temporary"' EXIT
+staged_dll="$(mktemp "$plugin_dir/.RuptureCompanion.dll.update.XXXXXX")"
+staged_sidecar="$(mktemp "$plugin_dir/.RuptureCompanion.json.update.XXXXXX")"
+rollback_prepare="$(mktemp "$plugin_dir/.RuptureCompanion.dll.rollback.XXXXXX")"
+rollback_dll="$plugin_dir/RuptureCompanion.dll.rollback"
+installed_dll="$plugin_dir/RuptureCompanion.dll"
+installed_sidecar="$plugin_dir/RuptureCompanion.json"
+cleanup() {
+    rm -rf -- "$temporary"
+    rm -f -- "$staged_dll" "$staged_sidecar" "$rollback_prepare"
+}
+trap cleanup EXIT
 curl -fL --retry 2 -o "$temporary/RuptureCompanion.dll" \
     "$release_base/$dll_asset"
 if [[ "$(od -An -N2 -tc "$temporary/RuptureCompanion.dll" | tr -d ' ')" != "MZ" ]]; then
@@ -71,10 +81,29 @@ if [[ "$(od -An -N2 -tc "$temporary/RuptureCompanion.dll" | tr -d ' ')" != "MZ" 
     exit 1
 fi
 
-install -m 0644 "$temporary/RuptureCompanion.dll" \
-    "$plugin_dir/RuptureCompanion.dll"
+if [[ -f "$rollback_dll" ]]; then
+    mv -f -- "$rollback_dll" "$installed_dll"
+fi
+install -m 0644 "$temporary/RuptureCompanion.dll" "$staged_dll"
 printf '{\n  "manifest_url": "%s"\n}\n' "$manifest_url" \
-    >"$plugin_dir/RuptureCompanion.json"
+    >"$staged_sidecar"
+had_installed_dll=0
+if [[ -f "$installed_dll" ]]; then
+    cp -p -- "$installed_dll" "$rollback_prepare"
+    mv -f -- "$rollback_prepare" "$rollback_dll"
+    had_installed_dll=1
+fi
+mv -f -- "$staged_dll" "$installed_dll"
+if ! mv -f -- "$staged_sidecar" "$installed_sidecar"; then
+    echo "Could not commit the plugin sidecar; restoring the previous DLL." >&2
+    if (( had_installed_dll )); then
+        mv -f -- "$rollback_dll" "$installed_dll"
+    else
+        rm -f -- "$installed_dll"
+    fi
+    exit 1
+fi
+rm -f -- "$rollback_dll"
 mkdir -p "$binary_dir/RuptureCompanion"
 
 auto_update_status="Mod Loader plugin auto-update was left unchanged."

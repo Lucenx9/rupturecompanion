@@ -54,7 +54,10 @@ def test_handle_captures_screenshot_and_remembers_non_web_answer(tmp_path, monke
     monkeypatch.setattr(
         daemon.ai_backend,
         "ask",
-        lambda question, path, history, **kwargs: "Add one more smelter.",
+        lambda question, path, history, **kwargs: daemon.ai_backend.AIResponse(
+            "Add one more smelter.",
+            used_web=False,
+        ),
     )
     conversation = daemon.Conversation()
     conversation.switch_session("session-a")
@@ -65,6 +68,32 @@ def test_handle_captures_screenshot_and_remembers_non_web_answer(tmp_path, monke
         "v1|5|session-a|ok\nAdd one more smelter.\n__RC_END__\n"
     )
     assert conversation.history == [("What is slow?", "Add one more smelter.")]
+
+
+def test_handle_does_not_remember_backward_compatible_web_answer(tmp_path, monkeypatch):
+    monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"png")
+
+    @contextmanager
+    def fake_capture():
+        yield shot
+
+    monkeypatch.setattr(daemon.screenshot, "capture_for_analysis", fake_capture)
+    monkeypatch.setattr(
+        daemon.ai_backend,
+        "ask",
+        lambda *args, **kwargs: daemon.ai_backend.AIResponse(
+            "Answer.\n\nSources:\nSteam",
+            used_web=True,
+        ),
+    )
+    conversation = daemon.Conversation(session_id="session-a")
+
+    daemon.handle(6, "What changed?", "Session mode: Standalone", conversation)
+
+    assert conversation.history == []
+    assert "Sources:\nSteam" in (tmp_path / "answer.txt").read_text(encoding="utf-8")
 
 
 def test_handle_does_not_repeat_ai_work_when_answer_publish_retries(
@@ -82,7 +111,7 @@ def test_handle_does_not_repeat_ai_work_when_answer_publish_retries(
     def fake_ask(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return "Stored answer."
+        return daemon.ai_backend.AIResponse("Stored answer.", used_web=False)
 
     real_write_answer = daemon.write_answer
     publish_attempts = 0

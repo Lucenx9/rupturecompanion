@@ -15,6 +15,7 @@ REQUIRED_FILES = (
     "daemon.py",
     "ai_backend.py",
     "screenshot.py",
+    "plugin_updater.py",
     "updater.py",
     "VERSION",
 )

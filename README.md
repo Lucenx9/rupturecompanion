@@ -103,6 +103,14 @@ available.
 Before starting the game, the platform launcher downloads the matching latest
 backend archive into `${XDG_DATA_HOME:-~/.local/share}/rupture-companion/` on
 Linux or `%LOCALAPPDATA%\RuptureCompanion` on Windows.
+The backend also compares the newest Mod Loader log with the installed plugin
+channel before the game starts. If a Mod Loader update changes its plugin
+interface, the launcher switches both the DLL and sidecar manifest to the
+compatible release channel. A failed sidecar commit rolls the DLL back; an
+interrupted rollback keeps its recovery copy for the next launch. Incomplete
+migrations are detected and retried before the game starts. The first launch
+after a loader update may be needed to record its new interface; the next
+launch performs the migration.
 If GitHub is unavailable, the last valid downloaded backend—or the checked-out
 copy—is used. Its locked production environment is synchronized automatically,
 so backend dependency changes are included in updates. Set `RC_AUTO_UPDATE=0`
@@ -137,7 +145,9 @@ Claude can read only the current screenshot. Bash, file editing, and game
 mutation tools are not available. Web sources are restricted by domain and
 validated before they reach the transcript. The backend then appends a versioned
 source-metadata block containing only the localized heading and approved site
-labels; the native plugin consumes that block and renders the labels as pills.
+labels when the native plugin advertises support, and the plugin renders those
+labels as pills. Older plugin versions receive a readable site-name list instead,
+so backend and DLL updates do not need to finish at exactly the same time.
 
 ## Development
 

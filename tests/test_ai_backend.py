@@ -89,12 +89,37 @@ def test_structured_response_renders_validated_sources():
         web_requests=1,
     )
 
-    answer = ai_backend.parse_structured_response(response, web_tools_enabled=True)
+    answer = ai_backend.parse_structured_response(
+        response,
+        web_tools_enabled=True,
+        source_pills_supported=True,
+    )
 
-    assert answer == (
+    assert answer.text == (
         "Update 2 changed that recipe.\n\n__RC_SOURCES_V1__\nSources:\nSteam"
     )
-    assert "https://" not in answer
+    assert answer.used_web
+    assert "https://" not in answer.text
+
+
+def test_structured_response_is_readable_for_older_plugins():
+    response = response_envelope(
+        "Update 2 changed that recipe.",
+        web_used=True,
+        sources=[{"url": "https://store.steampowered.com/news/app/1631270"}],
+        web_requests=1,
+    )
+
+    answer = ai_backend.parse_structured_response(
+        response,
+        web_tools_enabled=True,
+        source_pills_supported=False,
+    )
+
+    assert answer.text == "Update 2 changed that recipe.\n\nSources:\nSteam"
+    assert answer.used_web
+    assert ai_backend.SOURCE_BLOCK_MARKER not in answer.text
+    assert "https://" not in answer.text
 
 
 def test_structured_response_localizes_sources_heading():
@@ -106,12 +131,16 @@ def test_structured_response_localizes_sources_heading():
         sources_heading="Fonti:",
     )
 
-    answer = ai_backend.parse_structured_response(response, web_tools_enabled=True)
+    answer = ai_backend.parse_structured_response(
+        response,
+        web_tools_enabled=True,
+        source_pills_supported=True,
+    )
 
-    assert answer == (
+    assert answer.text == (
         "La patch ha modificato quella ricetta.\n\n__RC_SOURCES_V1__\nFonti:\nSteam"
     )
-    assert ai_backend.response_used_web(answer)
+    assert answer.used_web
 
 
 def test_source_block_protocol_matches_native_plugin():
@@ -123,6 +152,16 @@ def test_source_block_protocol_matches_native_plugin():
         f'constexpr const char* SourceBlockSeparator = "\\n\\n'
         f'{ai_backend.SOURCE_BLOCK_MARKER}\\n";'
     ) in plugin_source
+    assert (
+        f'constexpr const char* SourcePillsCapability = "'
+        f'{ai_backend.SOURCE_PILLS_CAPABILITY}";'
+    ) in plugin_source
+    assert (
+        f'constexpr const char* SourcePillsContextPrefix = "'
+        f'{ai_backend.SOURCE_PILLS_CONTEXT_PREFIX}";'
+    ) in plugin_source
+    assert "+ SourcePillsContextPrefix" in plugin_source
+    assert "+ SourcePillsCapability" in plugin_source
     assert "author == Message::Author::Companion" in plugin_source
 
 
@@ -143,9 +182,9 @@ def test_ask_limits_claude_to_screenshot_and_approved_web(monkeypatch, tmp_path)
 
     monkeypatch.setattr(ai_backend.subprocess, "run", fake_run)
 
-    assert ai_backend.ask("What is the bottleneck?", str(screenshot), []) == (
-        "Build a second smelter."
-    )
+    answer = ai_backend.ask("What is the bottleneck?", str(screenshot), [])
+
+    assert answer == ai_backend.AIResponse("Build a second smelter.", used_web=False)
     command = observed["command"]
     allowed = command[command.index("--allowedTools") + 1]
     assert f"Read({screenshot.as_posix()})" in allowed
@@ -153,6 +192,53 @@ def test_ask_limits_claude_to_screenshot_and_approved_web(monkeypatch, tmp_path)
     assert "WebFetch(domain:store.steampowered.com)" in allowed
     assert "Bash" not in command[command.index("--tools") + 1]
     assert observed["kwargs"]["cwd"] == screenshot.parent
+
+
+@pytest.mark.parametrize(
+    ("game_state", "expects_source_block"),
+    [
+        ("Session mode: Standalone", False),
+        (
+            "Session mode: Standalone\nCompanion capabilities: source-pills-v1",
+            True,
+        ),
+        (
+            "Session mode: Standalone\nCompanion capabilities: source-pills-v10",
+            False,
+        ),
+    ],
+)
+def test_ask_negotiates_source_pills_with_the_native_plugin(
+    monkeypatch, tmp_path, game_state, expects_source_block
+):
+    screenshot = tmp_path / "shot.png"
+    screenshot.write_bytes(b"png")
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=response_envelope(
+                "The patch changed that recipe.",
+                web_used=True,
+                sources=[{"url": "https://store.steampowered.com/news/app/1631270"}],
+                web_requests=1,
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(ai_backend.subprocess, "run", fake_run)
+
+    answer = ai_backend.ask(
+        "Search online for the latest recipe.",
+        str(screenshot),
+        [],
+        game_state=game_state,
+    )
+
+    assert (ai_backend.SOURCE_BLOCK_MARKER in answer.text) is expects_source_block
+    assert answer.used_web
+    assert "https://" not in answer.text
 
 
 @pytest.mark.parametrize(
@@ -232,9 +318,9 @@ def test_structured_response_ignores_unapproved_and_duplicate_sources():
 
     answer = ai_backend.parse_structured_response(response, web_tools_enabled=True)
 
-    assert answer.count("StarRupture Wiki") == 1
-    assert "https://" not in answer
-    assert "example.com" not in answer
+    assert answer.text.count("StarRupture Wiki") == 1
+    assert "https://" not in answer.text
+    assert "example.com" not in answer.text
 
 
 def test_run_with_cancellation_polls_until_claude_finishes(monkeypatch, tmp_path):
