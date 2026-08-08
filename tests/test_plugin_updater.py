@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -108,6 +109,79 @@ def test_sync_plugin_preserves_existing_pair_when_download_fails(tmp_path, monke
     assert not list(plugin_dir.glob("RuptureCompanion.*.update"))
 
 
+def test_sync_plugin_rolls_back_dll_when_sidecar_commit_fails(tmp_path, monkeypatch):
+    bridge = make_modloader_install(tmp_path, "loader supports [60, 60]\n")
+    plugin_dir = bridge.parent / "ModLoader/Plugins"
+    dll = plugin_dir / "RuptureCompanion.dll"
+    sidecar = plugin_dir / "RuptureCompanion.json"
+    original_sidecar = json.dumps({"manifest_url": plugin_updater.LEGACY_MANIFEST_URL})
+    dll.write_bytes(b"MZlegacy")
+    sidecar.write_text(original_sidecar, encoding="utf-8")
+    monkeypatch.setattr(
+        plugin_updater,
+        "download_plugin",
+        lambda _url, destination: destination.write_bytes(b"MZcurrent"),
+    )
+    real_replace = plugin_updater.os.replace
+
+    def fail_sidecar_commit(source, destination):
+        if Path(source).suffixes[-2:] == [".json", ".update"]:
+            raise OSError("sidecar is locked")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(plugin_updater.os, "replace", fail_sidecar_commit)
+
+    with pytest.raises(OSError, match="sidecar is locked"):
+        plugin_updater.sync_plugin(bridge)
+
+    assert dll.read_bytes() == b"MZlegacy"
+    assert sidecar.read_text(encoding="utf-8") == original_sidecar
+    assert not list(plugin_dir.glob("RuptureCompanion.*.update"))
+    assert not list(plugin_dir.glob("RuptureCompanion.*.backup"))
+    assert not (plugin_dir / "RuptureCompanion.dll.rollback").exists()
+
+
+def test_sync_plugin_retains_and_recovers_backup_when_rollback_fails(
+    tmp_path, monkeypatch
+):
+    bridge = make_modloader_install(tmp_path, "loader supports [60, 60]\n")
+    plugin_dir = bridge.parent / "ModLoader/Plugins"
+    dll = plugin_dir / "RuptureCompanion.dll"
+    sidecar = plugin_dir / "RuptureCompanion.json"
+    rollback = plugin_dir / "RuptureCompanion.dll.rollback"
+    dll.write_bytes(b"MZlegacy")
+    sidecar.write_text(
+        json.dumps({"manifest_url": plugin_updater.LEGACY_MANIFEST_URL}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        plugin_updater,
+        "download_plugin",
+        lambda _url, destination: destination.write_bytes(b"MZcurrent"),
+    )
+    real_replace = plugin_updater.os.replace
+
+    def fail_commit_and_rollback(source, destination):
+        source = Path(source)
+        if source.suffixes[-2:] == [".json", ".update"] or source == rollback:
+            raise OSError("transaction interrupted")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(plugin_updater.os, "replace", fail_commit_and_rollback)
+
+    with pytest.raises(OSError, match="transaction interrupted"):
+        plugin_updater.sync_plugin(bridge)
+
+    assert dll.read_bytes() == b"MZcurrent"
+    assert rollback.read_bytes() == b"MZlegacy"
+
+    monkeypatch.setattr(plugin_updater.os, "replace", real_replace)
+
+    assert plugin_updater.sync_plugin(bridge) == "Current v60"
+    assert dll.read_bytes() == b"MZcurrent"
+    assert not rollback.exists()
+
+
 def test_daemon_syncs_plugin_before_acquiring_lock(tmp_path, monkeypatch):
     events = []
     monkeypatch.setattr(daemon, "bridge_dir", lambda: tmp_path / "bridge")
@@ -129,9 +203,7 @@ def test_daemon_syncs_plugin_before_acquiring_lock(tmp_path, monkeypatch):
     assert events == [("sync", tmp_path / "bridge"), ("lock", None)]
 
 
-@pytest.mark.skipif(
-    plugin_updater.os.name == "nt", reason="Bash installer is Linux-only"
-)
+@pytest.mark.skipif(os.name == "nt", reason="Bash installer is Linux-only")
 def test_bash_installer_detects_new_loader_log_format(tmp_path):
     game_root = tmp_path / "StarRupture"
     binary_dir = game_root / "StarRupture/Binaries/Win64"
@@ -147,7 +219,7 @@ def test_bash_installer_detects_new_loader_log_format(tmp_path):
         "[AutoUpdate]\nEnabled=1\n", encoding="utf-8"
     )
     (log_dir / "ModLoader.log").write_text(
-        "Plugin interface version 47 not in supported range [60, 60]\n",
+        "Plugin interface version 47 not in supported range [46, 60]\n",
         encoding="utf-8",
     )
     fake_curl = fake_bin / "curl"
@@ -169,9 +241,9 @@ def test_bash_installer_detects_new_loader_log_format(tmp_path):
         check=False,
         capture_output=True,
         text=True,
-        env=plugin_updater.os.environ
+        env=os.environ
         | {
-            "PATH": f"{fake_bin}:{plugin_updater.os.environ['PATH']}",
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "CURL_URL_FILE": str(url_file),
         },
     )
@@ -191,3 +263,55 @@ def test_windows_installer_recognizes_new_loader_log_messages():
 
     assert "loader supports" in script
     assert "supported range" in script
+    assert script.index("$InterfaceMin -le 60") < script.index("$InterfaceMin -le 47")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell installer is Windows-only")
+def test_powershell_installer_prefers_current_for_overlapping_range(tmp_path):
+    game_root = tmp_path / "StarRupture"
+    binary_dir = game_root / "StarRupture/Binaries/Win64"
+    plugin_dir = binary_dir / "ModLoader/Plugins"
+    log_dir = binary_dir / "ModLoader/Logs"
+    plugin_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    (binary_dir / "StarRuptureGameSteam-Win64-Shipping.exe").write_bytes(b"")
+    (binary_dir / "dwmapi.dll").write_bytes(b"MZ")
+    (binary_dir / "ModLoader/modloader.ini").write_text(
+        "[AutoUpdate]\nEnabled=1\n", encoding="utf-8"
+    )
+    (log_dir / "ModLoader.log").write_text(
+        "Plugin interface version 47 not in supported range [46, 60]\n",
+        encoding="utf-8",
+    )
+    url_file = tmp_path / "download-url.txt"
+    installer = Path(__file__).parent.parent / "install-plugin.ps1"
+
+    def quote(path: Path) -> str:
+        return str(path).replace("'", "''")
+
+    command = (
+        "function Invoke-WebRequest { param([switch]$UseBasicParsing, "
+        "[string]$Uri, [string]$OutFile); "
+        "[IO.File]::WriteAllBytes($OutFile, [byte[]](0x4d,0x5a,0x00)); "
+        "[IO.File]::WriteAllText($env:DOWNLOAD_URL_FILE, $Uri) }; "
+        f"& '{quote(installer)}' -GameRoot '{quote(game_root)}'"
+    )
+
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "DOWNLOAD_URL_FILE": str(url_file),
+            "RC_ENABLE_AUTO_UPDATE": "0",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Current v60" in result.stdout
+    assert url_file.read_text(encoding="utf-8").endswith("/RuptureCompanion-Client.dll")
+    assert plugin_updater.CURRENT_MANIFEST_URL in (
+        plugin_dir / "RuptureCompanion.json"
+    ).read_text(encoding="utf-8")

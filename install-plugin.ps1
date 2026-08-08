@@ -89,14 +89,14 @@ if ($null -eq $InterfaceMin -or $null -eq $InterfaceMax) {
     throw "Could not detect the Mod Loader interface. Launch StarRupture once and retry."
 }
 
-if ($InterfaceMin -le 47 -and $InterfaceMax -ge 47) {
-    $Variant = "Legacy v47"
-    $DllAsset = "RuptureCompanion-Legacy.dll"
-    $ManifestUrl = "$ReleaseBase/RuptureCompanion-legacy-manifest.json"
-} elseif ($InterfaceMin -le 60 -and $InterfaceMax -ge 60) {
+if ($InterfaceMin -le 60 -and $InterfaceMax -ge 60) {
     $Variant = "Current v60"
     $DllAsset = "RuptureCompanion-Client.dll"
     $ManifestUrl = "$ReleaseBase/RuptureCompanion-client-manifest.json"
+} elseif ($InterfaceMin -le 47 -and $InterfaceMax -ge 47) {
+    $Variant = "Legacy v47"
+    $DllAsset = "RuptureCompanion-Legacy.dll"
+    $ManifestUrl = "$ReleaseBase/RuptureCompanion-legacy-manifest.json"
 } else {
     throw "Unsupported Mod Loader interface range: [$InterfaceMin, $InterfaceMax]"
 }
@@ -117,11 +117,40 @@ try {
         $Stream.Dispose()
     }
 
-    Copy-Item -LiteralPath $DownloadedDll `
-        -Destination (Join-Path $PluginDir "RuptureCompanion.dll") -Force
+    $InstalledDll = Join-Path $PluginDir "RuptureCompanion.dll"
+    $InstalledSidecar = Join-Path $PluginDir "RuptureCompanion.json"
+    $RollbackDll = Join-Path $PluginDir "RuptureCompanion.dll.rollback"
+    $StagedDll = Join-Path $PluginDir `
+        (".RuptureCompanion.dll.update." + [guid]::NewGuid())
+    $StagedSidecar = Join-Path $PluginDir `
+        (".RuptureCompanion.json.update." + [guid]::NewGuid())
+    $RollbackPrepare = Join-Path $PluginDir `
+        (".RuptureCompanion.dll.rollback." + [guid]::NewGuid())
+
+    if (Test-Path -LiteralPath $RollbackDll) {
+        Move-Item -LiteralPath $RollbackDll -Destination $InstalledDll -Force
+    }
+    Copy-Item -LiteralPath $DownloadedDll -Destination $StagedDll
     $Sidecar = @{ manifest_url = $ManifestUrl } | ConvertTo-Json
-    Write-Utf8NoBom (Join-Path $PluginDir "RuptureCompanion.json") `
-        ($Sidecar + [Environment]::NewLine)
+    Write-Utf8NoBom $StagedSidecar ($Sidecar + [Environment]::NewLine)
+    $HadInstalledDll = Test-Path -LiteralPath $InstalledDll
+    if ($HadInstalledDll) {
+        Copy-Item -LiteralPath $InstalledDll -Destination $RollbackPrepare
+        Move-Item -LiteralPath $RollbackPrepare -Destination $RollbackDll -Force
+    }
+    Move-Item -LiteralPath $StagedDll -Destination $InstalledDll -Force
+    try {
+        Move-Item -LiteralPath $StagedSidecar `
+            -Destination $InstalledSidecar -Force
+    } catch {
+        if ($HadInstalledDll) {
+            Move-Item -LiteralPath $RollbackDll -Destination $InstalledDll -Force
+        } else {
+            Remove-Item -LiteralPath $InstalledDll -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+    Remove-Item -LiteralPath $RollbackDll -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force `
         -Path (Join-Path $BinaryDir "RuptureCompanion") | Out-Null
 
@@ -143,6 +172,11 @@ try {
         $AutoUpdateStatus = "Mod Loader plugin auto-update is enabled."
     }
 } finally {
+    foreach ($Path in $StagedDll, $StagedSidecar, $RollbackPrepare) {
+        if ($Path) {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        }
+    }
     Remove-Item -LiteralPath $Temporary -Recurse -Force -ErrorAction SilentlyContinue
 }
 

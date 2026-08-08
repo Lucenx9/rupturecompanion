@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import tempfile
 import urllib.request
 from dataclasses import dataclass
@@ -136,20 +137,41 @@ def sync_plugin(bridge: Path) -> str | None:
 
     dll = plugin_dir / "RuptureCompanion.dll"
     sidecar = plugin_dir / "RuptureCompanion.json"
-    if dll.is_file() and _installed_manifest(sidecar) == variant.manifest_url:
+    rollback_dll = plugin_dir / "RuptureCompanion.dll.rollback"
+    installed_manifest = _installed_manifest(sidecar)
+    if rollback_dll.is_file():
+        if installed_manifest == variant.manifest_url:
+            rollback_dll.unlink()
+        else:
+            os.replace(rollback_dll, dll)
+    if dll.is_file() and installed_manifest == variant.manifest_url:
         return None
 
     temporary_dll = _temporary_path(plugin_dir, ".dll.update")
     temporary_sidecar = _temporary_path(plugin_dir, ".json.update")
+    backup_dll = _temporary_path(plugin_dir, ".dll.backup") if dll.is_file() else None
     try:
         download_plugin(variant.dll_url, temporary_dll)
         temporary_sidecar.write_text(
             json.dumps({"manifest_url": variant.manifest_url}, indent=2) + "\n",
             encoding="utf-8",
         )
+        if backup_dll is not None:
+            shutil.copy2(dll, backup_dll)
+            os.replace(backup_dll, rollback_dll)
         os.replace(temporary_dll, dll)
-        os.replace(temporary_sidecar, sidecar)
+        try:
+            os.replace(temporary_sidecar, sidecar)
+        except OSError:
+            if rollback_dll.is_file():
+                os.replace(rollback_dll, dll)
+            else:
+                dll.unlink(missing_ok=True)
+            raise
+        rollback_dll.unlink(missing_ok=True)
     finally:
         temporary_dll.unlink(missing_ok=True)
         temporary_sidecar.unlink(missing_ok=True)
+        if backup_dll is not None:
+            backup_dll.unlink(missing_ok=True)
     return variant.name
