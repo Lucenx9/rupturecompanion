@@ -113,26 +113,23 @@ function Wait-CompanionDaemon {
     param([System.Diagnostics.Process]$Process)
     $lockFile = Join-Path $BridgeDir "daemon.lock"
     $readyFile = Join-Path $BridgeDir "daemon.ready"
-    $expectedIdentity = [string]$Process.Id
-    if ($DaemonReadyProtocol -eq 1) {
-        $expectedIdentity += "|$DaemonReadyNonce"
-    }
+    $readyIdentityPattern = '^\d+\|' + [regex]::Escape($DaemonReadyNonce) + '$'
     for ($attempt = 0; $attempt -lt 2400; $attempt++) {
         $Process.Refresh()
         if ($Process.HasExited) { return $false }
         $lockIdentity = Read-CompanionState $lockFile
-        if ($lockIdentity -eq $expectedIdentity) {
-            if ($DaemonReadyProtocol -ne 1) {
+        if ($DaemonReadyProtocol -ne 1) {
+            if ($lockIdentity -match '^\d+$') {
                 try {
                     $lockWrittenUtc = (Get-Item -LiteralPath $lockFile).LastWriteTimeUtc
                     $processStartedUtc = $Process.StartTime.ToUniversalTime()
                     if ($lockWrittenUtc -ge $processStartedUtc) { return $true }
                 } catch {
                 }
-            } else {
-                $readyIdentity = Read-CompanionState $readyFile
-                if ($readyIdentity -eq $expectedIdentity) { return $true }
             }
+        } elseif ($lockIdentity -match $readyIdentityPattern) {
+            $readyIdentity = Read-CompanionState $readyFile
+            if ($readyIdentity -eq $lockIdentity) { return $true }
         }
         Start-Sleep -Milliseconds 50
     }
