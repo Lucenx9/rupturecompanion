@@ -149,6 +149,9 @@ def default_data_dir() -> Path:
 
 
 def main() -> None:
+    maintenance_requested = any(
+        option in sys.argv[1:] for option in ("--confirm", "--rollback")
+    )
     try:
         data_dir = default_data_dir()
         if "--confirm" in sys.argv[1:]:
@@ -159,6 +162,8 @@ def main() -> None:
             update_backend(data_dir)
     except (OSError, UpdateError, urllib.error.URLError) as error:
         print(f"Rupture Companion update skipped: {error}", file=sys.stderr)
+        if maintenance_requested:
+            raise SystemExit(1) from error
 
 
 if __name__ == "__main__":

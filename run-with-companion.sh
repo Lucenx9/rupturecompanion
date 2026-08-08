@@ -4,6 +4,7 @@ set -uo pipefail
 
 companion_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 python="$companion_dir/.venv/bin/python"
+bootstrap_python="$python"
 state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
 state_dir="$state_home/rupture-companion"
@@ -26,7 +27,7 @@ if ! command -v flock >/dev/null 2>&1; then
 fi
 
 mkdir -p "$state_dir" "$data_dir"
-"$python" "$companion_dir/updater.py" 2>>"$log_file" || true
+"$bootstrap_python" "$companion_dir/updater.py" 2>>"$log_file" || true
 if [[ -f "$data_dir/backend/daemon.py" ]]; then
     if command -v uv >/dev/null 2>&1 \
             && uv sync --project "$data_dir/backend" --locked --no-dev \
@@ -34,7 +35,8 @@ if [[ -f "$data_dir/backend/daemon.py" ]]; then
         backend_dir="$data_dir/backend"
         python="$backend_dir/.venv/bin/python"
     else
-        "$python" "$companion_dir/updater.py" --rollback 2>>"$log_file" || true
+        "$bootstrap_python" "$companion_dir/updater.py" --rollback \
+            2>>"$log_file" || true
     fi
 fi
 
@@ -104,11 +106,12 @@ trap 'if [[ -n "$game_pid" ]]; then kill -TERM "$game_pid" 2>/dev/null || true; 
 
 start_daemon
 if ! wait_for_daemon; then
-    "$python" "$companion_dir/updater.py" --rollback 2>>"$log_file" || true
+    "$bootstrap_python" "$companion_dir/updater.py" --rollback \
+        2>>"$log_file" || true
     echo "Companion daemon did not start; check $log_file" >&2
     exit 1
 fi
-"$python" "$companion_dir/updater.py" --confirm 2>>"$log_file" || true
+"$bootstrap_python" "$companion_dir/updater.py" --confirm 2>>"$log_file" || true
 
 "$@" &
 game_pid=$!
@@ -130,13 +133,15 @@ while true; do
     echo "Daemon stopped unexpectedly; restarting" >>"$log_file"
     start_daemon
     if ! wait_for_daemon; then
-        "$python" "$companion_dir/updater.py" --rollback 2>>"$log_file" || true
+        "$bootstrap_python" "$companion_dir/updater.py" --rollback \
+            2>>"$log_file" || true
         echo "Companion daemon is unavailable; check $log_file" >&2
         wait "$game_pid"
         game_status=$?
         break
     fi
-    "$python" "$companion_dir/updater.py" --confirm 2>>"$log_file" || true
+    "$bootstrap_python" "$companion_dir/updater.py" --confirm \
+        2>>"$log_file" || true
 done
 game_pid=""
 exit "$game_status"

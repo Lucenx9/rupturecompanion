@@ -13,11 +13,12 @@ $Python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $Python)) {
     throw "Companion Python environment not found. Run: uv sync --group dev"
 }
+$BootstrapPython = $Python
 $StateDir = Join-Path $env:LOCALAPPDATA "RuptureCompanion"
 $DataDir = $StateDir
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
-& $Python (Join-Path $PSScriptRoot "updater.py") 2>> `
+& $BootstrapPython (Join-Path $PSScriptRoot "updater.py") 2>> `
     (Join-Path $StateDir "updater.log")
 $BackendDir = Join-Path $DataDir "backend"
 $BackendPython = Join-Path $BackendDir ".venv\Scripts\python.exe"
@@ -27,7 +28,7 @@ if (Test-Path -LiteralPath (Join-Path $BackendDir "daemon.py")) {
     if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $BackendPython)) {
         $Python = $BackendPython
     } else {
-        & $Python (Join-Path $PSScriptRoot "updater.py") --rollback 2>> `
+        & $BootstrapPython (Join-Path $PSScriptRoot "updater.py") --rollback 2>> `
             (Join-Path $StateDir "updater.log")
         $BackendDir = $PSScriptRoot
     }
@@ -106,11 +107,11 @@ $Daemon = Start-CompanionDaemon
 $Game = $null
 try {
     if (-not (Wait-CompanionDaemon $Daemon)) {
-        & $Python (Join-Path $PSScriptRoot "updater.py") --rollback 2>> `
+        & $BootstrapPython (Join-Path $PSScriptRoot "updater.py") --rollback 2>> `
             (Join-Path $StateDir "updater.log")
         throw "Companion daemon did not start. Check $StateDir."
     }
-    & $Python (Join-Path $PSScriptRoot "updater.py") --confirm 2>> `
+    & $BootstrapPython (Join-Path $PSScriptRoot "updater.py") --confirm 2>> `
         (Join-Path $StateDir "updater.log")
 
     $Executable = $GameCommand[0]
@@ -137,7 +138,7 @@ try {
                 $Daemon.WaitForExit()
                 $Daemon = Start-CompanionDaemon
                 if (Wait-CompanionDaemon $Daemon) {
-                    & $Python (Join-Path $PSScriptRoot "updater.py") --confirm `
+                    & $BootstrapPython (Join-Path $PSScriptRoot "updater.py") --confirm `
                         2>> (Join-Path $StateDir "updater.log")
                 } else {
                     Write-Warning "Companion daemon could not restart; check $StateDir."

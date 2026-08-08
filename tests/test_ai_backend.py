@@ -109,7 +109,7 @@ def test_ask_limits_claude_to_screenshot_and_approved_web(monkeypatch, tmp_path)
     )
     command = observed["command"]
     allowed = command[command.index("--allowedTools") + 1]
-    assert f"Read({screenshot})" in allowed
+    assert f"Read({screenshot.as_posix()})" in allowed
     assert "WebSearch" in allowed
     assert "WebFetch(domain:store.steampowered.com)" in allowed
     assert "Bash" not in command[command.index("--tools") + 1]
