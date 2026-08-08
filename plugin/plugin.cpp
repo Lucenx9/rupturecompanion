@@ -26,6 +26,8 @@ constexpr std::size_t MaxMessages = 100;
 constexpr std::chrono::seconds RequestTimeout = 210s;
 constexpr std::size_t InputCapacity = 2048;
 constexpr const char* SourceBlockSeparator = "\n\n__RC_SOURCES_V1__\n";
+constexpr const char* SourcePillsCapability = "source-pills-v1";
+constexpr const char* SourcePillsContextPrefix = "Companion capabilities: ";
 constexpr std::size_t MaxSources = 3;
 
 #ifndef MODLOADER_BUILD_TAG
@@ -207,29 +209,29 @@ void ResetConversation()
 
 std::string SessionContext()
 {
-    if (g_self == nullptr || g_self->hooks == nullptr || g_self->hooks->NetMode == nullptr)
-    {
-        return "Session mode: Unknown";
-    }
     const char* mode = "Unknown";
-    switch (g_self->hooks->NetMode->GetNetMode())
+    if (g_self != nullptr && g_self->hooks != nullptr && g_self->hooks->NetMode != nullptr)
     {
-    case EPluginNetMode::Standalone:
-        mode = "Standalone";
-        break;
-    case EPluginNetMode::DedicatedServer:
-        mode = "Dedicated server";
-        break;
-    case EPluginNetMode::ListenServer:
-        mode = "Listen server";
-        break;
-    case EPluginNetMode::Client:
-        mode = "Multiplayer client";
-        break;
-    default:
-        break;
+        switch (g_self->hooks->NetMode->GetNetMode())
+        {
+        case EPluginNetMode::Standalone:
+            mode = "Standalone";
+            break;
+        case EPluginNetMode::DedicatedServer:
+            mode = "Dedicated server";
+            break;
+        case EPluginNetMode::ListenServer:
+            mode = "Listen server";
+            break;
+        case EPluginNetMode::Client:
+            mode = "Multiplayer client";
+            break;
+        default:
+            break;
+        }
     }
-    return std::string("Session mode: ") + mode;
+    return std::string("Session mode: ") + mode + "\n" + SourcePillsContextPrefix
+        + SourcePillsCapability;
 }
 
 bool SubmitQuestion(const std::string& rawQuestion)
