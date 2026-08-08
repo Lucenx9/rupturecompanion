@@ -1,5 +1,6 @@
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -111,6 +112,18 @@ def test_structured_response_localizes_sources_heading():
         "La patch ha modificato quella ricetta.\n\n__RC_SOURCES_V1__\nFonti:\nSteam"
     )
     assert ai_backend.response_used_web(answer)
+
+
+def test_source_block_protocol_matches_native_plugin():
+    plugin_source = (Path(__file__).parents[1] / "plugin/plugin.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        f'constexpr const char* SourceBlockSeparator = "\\n\\n'
+        f'{ai_backend.SOURCE_BLOCK_MARKER}\\n";'
+    ) in plugin_source
+    assert "author == Message::Author::Companion" in plugin_source
 
 
 def test_ask_limits_claude_to_screenshot_and_approved_web(monkeypatch, tmp_path):

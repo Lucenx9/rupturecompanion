@@ -133,7 +133,7 @@ void AddMessageLocked(const Message::Author author, std::string text)
 {
     Message message{author, std::move(text), {}, {}};
     const std::size_t marker = message.text.rfind(SourceBlockSeparator);
-    if (marker != std::string::npos)
+    if (author == Message::Author::Companion && marker != std::string::npos)
     {
         std::istringstream sourceBlock(
             message.text.substr(marker + std::char_traits<char>::length(SourceBlockSeparator)));
