@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -180,6 +181,45 @@ def test_sync_plugin_retains_and_recovers_backup_when_rollback_fails(
     assert plugin_updater.sync_plugin(bridge) == "Current v60"
     assert dll.read_bytes() == b"MZcurrent"
     assert not rollback.exists()
+
+
+def test_sync_plugin_serializes_concurrent_migrations(tmp_path, monkeypatch):
+    bridge = make_modloader_install(tmp_path, "loader supports [60, 60]\n")
+    plugin_dir = bridge.parent / "ModLoader/Plugins"
+    (plugin_dir / "RuptureCompanion.dll").write_bytes(b"MZlegacy")
+    (plugin_dir / "RuptureCompanion.json").write_text(
+        json.dumps({"manifest_url": plugin_updater.LEGACY_MANIFEST_URL}),
+        encoding="utf-8",
+    )
+    download_started = threading.Event()
+    release_download = threading.Event()
+    downloads = []
+    results = []
+
+    def blocked_download(url: str, destination: Path) -> None:
+        downloads.append(url)
+        download_started.set()
+        assert release_download.wait(timeout=2)
+        destination.write_bytes(b"MZcurrent")
+
+    def migrate() -> None:
+        results.append(plugin_updater.sync_plugin(bridge))
+
+    monkeypatch.setattr(plugin_updater, "download_plugin", blocked_download)
+    first = threading.Thread(target=migrate)
+    second = threading.Thread(target=migrate)
+    first.start()
+    assert download_started.wait(timeout=2)
+    second.start()
+    assert second.is_alive()
+    release_download.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert downloads == [plugin_updater.CURRENT_DLL_URL]
+    assert sorted(result for result in results if result is not None) == ["Current v60"]
 
 
 def test_daemon_syncs_plugin_before_acquiring_lock(tmp_path, monkeypatch):

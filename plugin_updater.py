@@ -4,8 +4,15 @@ import re
 import shutil
 import tempfile
 import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 RELEASE_BASE = "https://github.com/Lucenx9/rupturecompanion/releases/latest/download"
 LEGACY_MANIFEST_URL = f"{RELEASE_BASE}/RuptureCompanion-legacy-manifest.json"
@@ -124,12 +131,46 @@ def _temporary_path(directory: Path, suffix: str) -> Path:
     return Path(name)
 
 
-def sync_plugin(bridge: Path) -> str | None:
-    binary_dir = bridge.parent
-    modloader_dir = binary_dir / "ModLoader"
-    plugin_dir = modloader_dir / "Plugins"
+@contextmanager
+def _migration_lock(plugin_dir: Path) -> Iterator[None]:
+    lock = (plugin_dir / ".RuptureCompanion.migration.lock").open("a+b")
+    locked = False
+    try:
+        if os.name == "nt":
+            lock.seek(0, os.SEEK_END)
+            if lock.tell() == 0:
+                lock.write(b"\0")
+                lock.flush()
+            lock.seek(0)
+            msvcrt.locking(  # type: ignore[attr-defined]
+                lock.fileno(),
+                msvcrt.LK_LOCK,  # type: ignore[attr-defined]
+                1,  # type: ignore[attr-defined]
+            )
+        else:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)  # type: ignore[attr-defined]
+        locked = True
+        yield
+    finally:
+        if locked:
+            if os.name == "nt":
+                lock.seek(0)
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    lock.fileno(),
+                    msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+                    1,  # type: ignore[attr-defined]
+                )
+            else:
+                fcntl.flock(  # type: ignore[attr-defined]
+                    lock.fileno(),
+                    fcntl.LOCK_UN,  # type: ignore[attr-defined]
+                )
+        lock.close()
+
+
+def _sync_plugin_locked(modloader_dir: Path, plugin_dir: Path) -> str | None:
     interface_range = _latest_interface(modloader_dir / "Logs")
-    if interface_range is None or not plugin_dir.is_dir():
+    if interface_range is None:
         return None
     variant = _select_variant(*interface_range)
     if variant is None:
@@ -175,3 +216,12 @@ def sync_plugin(bridge: Path) -> str | None:
         if backup_dll is not None:
             backup_dll.unlink(missing_ok=True)
     return variant.name
+
+
+def sync_plugin(bridge: Path) -> str | None:
+    modloader_dir = bridge.parent / "ModLoader"
+    plugin_dir = modloader_dir / "Plugins"
+    if not plugin_dir.is_dir():
+        return None
+    with _migration_lock(plugin_dir):
+        return _sync_plugin_locked(modloader_dir, plugin_dir)
