@@ -225,3 +225,52 @@ def test_powershell_launcher_refreshes_nonce_when_daemon_restarts(tmp_path):
     launched_nonces = nonces.read_text(encoding="utf-8").splitlines()
     assert len(launched_nonces) >= 2
     assert launched_nonces[0] != launched_nonces[1]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell launcher is Windows-only")
+def test_powershell_launcher_rolls_back_backend_when_uv_is_missing(tmp_path):
+    powershell = shutil.which("powershell.exe")
+    command_prompt = shutil.which("cmd.exe")
+    assert powershell is not None
+    assert command_prompt is not None
+    local_app_data = tmp_path / "local-app-data"
+    backend = local_app_data / "RuptureCompanion/backend"
+    backend_python = backend / ".venv/Scripts/python.exe"
+    backend_python.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "pyproject.toml", backend)
+    shutil.copy2(ROOT / "uv.lock", backend)
+    shutil.copy2(command_prompt, backend_python)
+    (backend / "daemon.py").write_text(
+        "raise RuntimeError('stale backend must not run')\n",
+        encoding="utf-8",
+    )
+    system_root = Path(os.environ["SYSTEMROOT"])
+    env = os.environ | {
+        "LOCALAPPDATA": str(local_app_data),
+        "PATH": str(system_root / "System32"),
+        "RC_AUTO_UPDATE": "0",
+        "RC_BRIDGE_DIR": str(tmp_path / "bridge"),
+    }
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "run-with-companion.ps1"),
+            command_prompt,
+            "/d",
+            "/c",
+            "exit 7",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 7, result.stderr
+    assert not backend.exists()

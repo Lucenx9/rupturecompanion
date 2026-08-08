@@ -30,9 +30,13 @@ if (Test-Path -LiteralPath (Join-Path $BackendDir "daemon.py")) {
     $ErrorActionPreference = "Continue"
     $SyncExitCode = 1
     try {
-        & uv sync --project $BackendDir --locked --no-dev 2>> `
-            (Join-Path $StateDir "updater.log")
-        $SyncExitCode = $LASTEXITCODE
+        $UvCommand = Get-Command uv -CommandType Application `
+            -ErrorAction SilentlyContinue
+        if ($UvCommand) {
+            & $UvCommand.Source sync --project $BackendDir --locked --no-dev 2>> `
+                (Join-Path $StateDir "updater.log")
+            $SyncExitCode = $LASTEXITCODE
+        }
     } finally {
         $ErrorActionPreference = $PreviousErrorActionPreference
         if ($HadActiveVirtualEnv) {
