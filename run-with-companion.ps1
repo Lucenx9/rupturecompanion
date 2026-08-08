@@ -23,9 +23,23 @@ New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 $BackendDir = Join-Path $DataDir "backend"
 $BackendPython = Join-Path $BackendDir ".venv\Scripts\python.exe"
 if (Test-Path -LiteralPath (Join-Path $BackendDir "daemon.py")) {
-    & uv sync --project $BackendDir --locked --no-dev 2>> `
-        (Join-Path $StateDir "updater.log")
-    if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $BackendPython)) {
+    $HadActiveVirtualEnv = Test-Path Env:VIRTUAL_ENV
+    $ActiveVirtualEnv = $env:VIRTUAL_ENV
+    Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $SyncExitCode = 1
+    try {
+        & uv sync --project $BackendDir --locked --no-dev 2>> `
+            (Join-Path $StateDir "updater.log")
+        $SyncExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+        if ($HadActiveVirtualEnv) {
+            $env:VIRTUAL_ENV = $ActiveVirtualEnv
+        }
+    }
+    if ($SyncExitCode -eq 0 -and (Test-Path -LiteralPath $BackendPython)) {
         $Python = $BackendPython
     } else {
         & $BootstrapPython (Join-Path $PSScriptRoot "updater.py") --rollback 2>> `
