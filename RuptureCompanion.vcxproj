@@ -37,6 +37,9 @@
     <IntDir>$(SolutionDir)obj\$(Configuration)\</IntDir>
     <TargetName>RuptureCompanion</TargetName>
     <TargetExt>.dll</TargetExt>
+    <GameSDKRoot Condition="'$(GameSDKRoot)'==''">$(SolutionDir)game-sdk</GameSDKRoot>
+    <GameSDKClientDir>$(GameSDKRoot)\Client\</GameSDKClientDir>
+    <GameSDKSourceDir>$(GameSDKClientDir)SDK\</GameSDKSourceDir>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -47,8 +50,9 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <RuntimeLibrary Condition="'$(Configuration)'=='Client Debug'">MultiThreadedDebug</RuntimeLibrary>
       <RuntimeLibrary Condition="'$(Configuration)'=='Client Release'">MultiThreaded</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(PluginSDKInclude);$(ProjectDir)include;$(ProjectDir)plugin;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(PluginSDKInclude);$(ProjectDir)include;$(ProjectDir)plugin;$(GameSDKClientDir);$(GameSDKSourceDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -75,12 +79,31 @@
   <ItemGroup>
     <ClInclude Include="include\plugin_interface.h" />
     <ClInclude Include="plugin\bridge.h" />
+    <ClInclude Include="plugin\live_context.h" />
     <ClInclude Include="plugin\plugin.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="plugin\bridge.cpp" />
     <ClCompile Include="plugin\dllmain.cpp" />
+    <ClCompile Include="plugin\live_context.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
     <ClCompile Include="plugin\plugin.cpp" />
+    <ClCompile Include="$(GameSDKSourceDir)Basic.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(GameSDKSourceDir)CoreUObject_functions.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(GameSDKSourceDir)Engine_functions.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(GameSDKSourceDir)AuItems_functions.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(GameSDKSourceDir)Chimera_functions.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

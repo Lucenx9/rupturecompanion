@@ -4,6 +4,7 @@
 #include "plugin.h"
 
 #include "bridge.h"
+#include "live_context.h"
 
 #include <algorithm>
 #include <atomic>
@@ -28,6 +29,7 @@ constexpr std::size_t InputCapacity = 2048;
 constexpr const char* SourceBlockSeparator = "\n\n__RC_SOURCES_V1__\n";
 constexpr const char* SourcePillsCapability = "source-pills-v1";
 constexpr const char* SourcePillsContextPrefix = "Companion capabilities: ";
+constexpr const char* LiveContextMarker = "__RC_LIVE_CONTEXT_V1__";
 constexpr std::size_t MaxSources = 3;
 
 #ifndef MODLOADER_BUILD_TAG
@@ -230,8 +232,17 @@ std::string SessionContext()
             break;
         }
     }
-    return std::string("Session mode: ") + mode + "\n" + SourcePillsContextPrefix
-        + SourcePillsCapability;
+    std::string context = std::string("Session mode: ") + mode + "\n"
+        + SourcePillsContextPrefix + SourcePillsCapability;
+    const std::string liveContext = RuptureCompanion::LiveContext::Snapshot();
+    if (!liveContext.empty())
+    {
+        context += "\n";
+        context += LiveContextMarker;
+        context += "\n";
+        context += liveContext;
+    }
+    return context;
 }
 
 bool SubmitQuestion(const std::string& rawQuestion)
@@ -256,7 +267,7 @@ bool SubmitQuestion(const std::string& rawQuestion)
         g_chat.waitingSince = std::chrono::steady_clock::now();
         g_chat.lastQuestion = question;
         g_chat.canRetry = false;
-        g_chat.status = "Analyzing screenshot...";
+        g_chat.status = "Analyzing live game state and screenshot...";
         AddMessageLocked(Message::Author::Player, question);
     }
 
@@ -424,7 +435,8 @@ void RenderPanel(IModLoaderImGui* ui)
             const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
                                      std::chrono::steady_clock::now() - waitingSince)
                                      .count();
-            status = "Analyzing screenshot... " + std::to_string(seconds) + "s";
+            status = "Analyzing live game state and screenshot... "
+                + std::to_string(seconds) + "s";
         }
         ui->TextDisabled(status.c_str());
         ui->Separator();
@@ -575,6 +587,10 @@ __declspec(dllexport) bool PluginInit(IPluginSelf* self)
         self->hooks->UI->RegisterOnPanelWindowClosed(&OnPanelClosed);
         self->hooks->Input->RegisterKeybindByName(
             g_openKey, EModKeyEvent::Pressed, &TogglePanel);
+        if (!RuptureCompanion::LiveContext::Initialize(self))
+        {
+            LogError("Live game-state hooks are unavailable; screenshot fallback remains active");
+        }
         ResetConversation();
         g_pollThread = std::jthread(&PollLoop);
         LogInfo("Plugin initialized; press the configured key to open the chat");
@@ -582,6 +598,7 @@ __declspec(dllexport) bool PluginInit(IPluginSelf* self)
     }
     catch (...)
     {
+        RuptureCompanion::LiveContext::Shutdown();
         LogError("Plugin initialization failed unexpectedly");
         return false;
     }
@@ -591,6 +608,7 @@ __declspec(dllexport) void PluginShutdown()
 {
     try
     {
+        RuptureCompanion::LiveContext::Shutdown();
         if (g_pollThread.joinable())
         {
             g_pollThread.request_stop();

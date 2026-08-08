@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -19,6 +20,10 @@ import screenshot
 
 REQUEST_PREFIX = "v1|"
 END_MARKER = "__RC_END__"
+LIVE_CONTEXT_MARKER = "__RC_LIVE_CONTEXT_V1__"
+MAX_REQUEST_BYTES = 64 * 1024
+MAX_CONTEXT_BYTES = 56 * 1024
+MAX_LIVE_CONTEXT_BYTES = 48 * 1024
 MAX_HISTORY_TURNS = ai_backend.HISTORY_TURNS
 POLL_SECONDS = 0.25
 READY_PROTOCOL_VERSION = 1
@@ -136,6 +141,90 @@ def acquire_lock(identity: str | None = None) -> TextIO:
     return lock
 
 
+def _json_object_without_duplicate_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_non_finite_json(value: str) -> object:
+    raise ValueError(f"invalid JSON number: {value}")
+
+
+def _valid_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _validated_live_context(raw: str) -> str | None:
+    if not raw or len(raw.encode("utf-8")) > MAX_LIVE_CONTEXT_BYTES:
+        return None
+    try:
+        value = json.loads(
+            raw,
+            object_pairs_hook=_json_object_without_duplicate_keys,
+            parse_constant=_reject_non_finite_json,
+        )
+    except (json.JSONDecodeError, RecursionError, UnicodeError, ValueError):
+        return None
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        return None
+    captured_at = value.get("captured_at_unix_ms")
+    status = value.get("status")
+    if (
+        not isinstance(captured_at, int)
+        or isinstance(captured_at, bool)
+        or captured_at < 0
+        or not isinstance(status, dict)
+        or not isinstance(status.get("available"), bool)
+        or not isinstance(status.get("partial"), bool)
+        or not _valid_string_list(status.get("missing_sections"))
+        or not _valid_string_list(status.get("truncated_sections"))
+    ):
+        return None
+    normalized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return (
+        normalized
+        if len(normalized.encode("utf-8")) <= MAX_LIVE_CONTEXT_BYTES
+        else None
+    )
+
+
+def normalize_context(context: str) -> str:
+    lines = context.splitlines()
+    marker_indexes = [
+        index for index, line in enumerate(lines) if line == LIVE_CONTEXT_MARKER
+    ]
+    if not marker_indexes:
+        return (
+            context.strip() if len(context.encode("utf-8")) <= MAX_CONTEXT_BYTES else ""
+        )
+    first_marker = marker_indexes[0]
+    metadata = "\n".join(lines[:first_marker]).strip()
+    safe_metadata = (
+        metadata if len(metadata.encode("utf-8")) <= MAX_CONTEXT_BYTES else ""
+    )
+    if len(marker_indexes) != 1 or first_marker + 2 != len(lines):
+        return safe_metadata
+    live_context = _validated_live_context(lines[first_marker + 1])
+    if live_context is None:
+        return safe_metadata
+    normalized = (
+        f"{metadata}\n{LIVE_CONTEXT_MARKER}\n{live_context}"
+        if metadata
+        else f"{LIVE_CONTEXT_MARKER}\n{live_context}"
+    )
+    return (
+        normalized
+        if len(normalized.encode("utf-8")) <= MAX_CONTEXT_BYTES
+        else safe_metadata
+    )
+
+
 def parse_request(text: str) -> tuple[int, str, str, str] | None:
     lines = text.splitlines()
     if len(lines) < 2 or lines[-1] != END_MARKER:
@@ -152,7 +241,7 @@ def parse_request(text: str) -> tuple[int, str, str, str] | None:
         return None
     if parsed_sequence < 0:
         return None
-    context = "\n".join(lines[1:-1]).strip()
+    context = normalize_context("\n".join(lines[1:-1]).strip())
     return parsed_sequence, session_id.strip(), question.strip(), context
 
 
@@ -237,7 +326,11 @@ def handle(
 
 def read_request() -> str:
     try:
-        return (bridge_dir() / "question.txt").read_text(encoding="utf-8")
+        with (bridge_dir() / "question.txt").open("rb") as request:
+            payload = request.read(MAX_REQUEST_BYTES + 1)
+        if len(payload) > MAX_REQUEST_BYTES:
+            return ""
+        return payload.decode("utf-8", errors="strict")
     except (OSError, UnicodeDecodeError):
         return ""
 

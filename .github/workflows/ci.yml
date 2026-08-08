@@ -48,6 +48,11 @@ jobs:
           repository: AlienXAXS/StarRupture-Plugin-SDK
           ref: v1.17.3
           path: plugin-sdk
+      - uses: actions/checkout@v4
+        with:
+          repository: AlienXAXS/StarRupture-Game-SDK
+          ref: 2c7d138506e42011d1ccf4ee044339c154b45b90
+          path: game-sdk
       - uses: microsoft/setup-msbuild@v2
       - name: Build current interface
         shell: pwsh
@@ -55,6 +60,7 @@ jobs:
           msbuild RuptureCompanion.sln `
             /p:Configuration="Client Release" `
             /p:Platform=x64 `
+            /p:GameSDKRoot="${{ github.workspace }}\game-sdk" `
             /p:PluginSDKInclude="${{ github.workspace }}\plugin-sdk\include" `
             /m /v:minimal
       - name: Download legacy v47 interface
@@ -70,5 +76,6 @@ jobs:
           msbuild RuptureCompanion.sln /t:Rebuild `
             /p:Configuration="Client Release" `
             /p:Platform=x64 `
+            /p:GameSDKRoot="${{ github.workspace }}\game-sdk" `
             /p:PluginSDKInclude="${{ github.workspace }}\legacy-sdk\include" `
             /m /v:minimal

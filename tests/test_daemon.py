@@ -1,8 +1,25 @@
+import json
 from contextlib import contextmanager
 
 import pytest
 
 import daemon
+
+
+def live_snapshot(**overrides):
+    snapshot = {
+        "schema_version": 1,
+        "captured_at_unix_ms": 1_800_000_000_000,
+        "status": {
+            "available": True,
+            "partial": False,
+            "missing_sections": [],
+            "truncated_sections": [],
+        },
+        "player": {"vitals": {"health": {"current": 75, "max": 100}}},
+    }
+    snapshot.update(overrides)
+    return snapshot
 
 
 def test_parse_request_requires_complete_marker():
@@ -28,6 +45,83 @@ def test_parse_request_preserves_pipes_in_question():
         "iron | copper?",
         "",
     )
+
+
+def test_parse_request_validates_and_normalizes_live_context():
+    snapshot = json.dumps(live_snapshot(), indent=2).replace("\n", " ")
+    request = (
+        "v1|8|session-live|How am I doing?\n"
+        "Session mode: Standalone\n"
+        "__RC_LIVE_CONTEXT_V1__\n"
+        f"{snapshot}\n"
+        "__RC_END__\n"
+    )
+
+    parsed = daemon.parse_request(request)
+
+    assert parsed is not None
+    assert parsed[:3] == (8, "session-live", "How am I doing?")
+    assert parsed[3].startswith("Session mode: Standalone\n__RC_LIVE_CONTEXT_V1__\n")
+    normalized = json.loads(parsed[3].splitlines()[-1])
+    assert normalized["player"]["vitals"]["health"]["current"] == 75
+
+
+@pytest.mark.parametrize(
+    "live_context",
+    [
+        "not-json",
+        "[]",
+        '{"schema_version":2}',
+        '{"schema_version":1,"schema_version":1}',
+        '{"schema_version":1,"captured_at_unix_ms":NaN}',
+    ],
+)
+def test_parse_request_discards_invalid_live_context(live_context):
+    request = (
+        "v1|9|session-live|Question\n"
+        "Session mode: Standalone\n"
+        "__RC_LIVE_CONTEXT_V1__\n"
+        f"{live_context}\n"
+        "__RC_END__\n"
+    )
+
+    assert daemon.parse_request(request) == (
+        9,
+        "session-live",
+        "Question",
+        "Session mode: Standalone",
+    )
+
+
+def test_parse_request_discards_duplicate_live_context_markers():
+    snapshot = json.dumps(live_snapshot(), separators=(",", ":"))
+    request = (
+        "v1|10|session-live|Question\n"
+        "Session mode: Standalone\n"
+        "__RC_LIVE_CONTEXT_V1__\n"
+        f"{snapshot}\n"
+        "__RC_LIVE_CONTEXT_V1__\n"
+        f"{snapshot}\n"
+        "__RC_END__\n"
+    )
+
+    assert daemon.parse_request(request) == (
+        10,
+        "session-live",
+        "Question",
+        "Session mode: Standalone",
+    )
+
+
+def test_read_request_rejects_oversized_or_invalid_utf8(tmp_path, monkeypatch):
+    monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
+    request = tmp_path / "question.txt"
+    request.write_bytes(b"x" * (daemon.MAX_REQUEST_BYTES + 1))
+
+    assert daemon.read_request() == ""
+
+    request.write_bytes(b"\xff")
+    assert daemon.read_request() == ""
 
 
 def test_write_answer_is_atomic_and_escapes_reserved_marker(tmp_path, monkeypatch):
