@@ -82,6 +82,33 @@ function Stop-ProcessTree {
     }
 }
 
+function Reset-LegacyCompanionState {
+    $lockFile = Join-Path $BridgeDir "daemon.lock"
+    $stream = $null
+    $locked = $false
+    try {
+        $stream = [System.IO.File]::Open(
+            $lockFile,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::ReadWrite
+        )
+        $stream.Lock(0, 1)
+        $locked = $true
+        $sentinel = [System.Text.Encoding]::UTF8.GetBytes(
+            "starting-$([guid]::NewGuid().ToString('N'))"
+        )
+        $stream.SetLength(0)
+        $stream.Write($sentinel, 0, $sentinel.Length)
+        $stream.Flush()
+    } catch {
+        throw "Could not prepare the legacy daemon state; another daemon may be running."
+    } finally {
+        if ($locked) { $stream.Unlock(0, 1) }
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
 function Start-CompanionDaemon {
     $script:DaemonReadyNonce = if ($DaemonReadyProtocol -eq 1) {
         [guid]::NewGuid().ToString("N")
@@ -90,6 +117,9 @@ function Start-CompanionDaemon {
     }
     $env:RC_DAEMON_READY_PROTOCOL = [string]$DaemonReadyProtocol
     $env:RC_DAEMON_READY_NONCE = $DaemonReadyNonce
+    if ($DaemonReadyProtocol -ne 1) {
+        Reset-LegacyCompanionState
+    }
     $daemonScript = Join-Path $BackendDir "daemon.py"
     $daemonArgument = '"' + $daemonScript.Replace('"', '\"') + '"'
     return Start-Process -FilePath $Python -ArgumentList $daemonArgument `
@@ -119,14 +149,7 @@ function Wait-CompanionDaemon {
         if ($Process.HasExited) { return $false }
         $lockIdentity = Read-CompanionState $lockFile
         if ($DaemonReadyProtocol -ne 1) {
-            if ($lockIdentity -match '^\d+$') {
-                try {
-                    $lockWrittenUtc = (Get-Item -LiteralPath $lockFile).LastWriteTimeUtc
-                    $processStartedUtc = $Process.StartTime.ToUniversalTime()
-                    if ($lockWrittenUtc -ge $processStartedUtc) { return $true }
-                } catch {
-                }
-            }
+            if ($lockIdentity -match '^\d+$') { return $true }
         } elseif ($lockIdentity -match $readyIdentityPattern) {
             $readyIdentity = Read-CompanionState $readyFile
             if ($readyIdentity -eq $lockIdentity) { return $true }

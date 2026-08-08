@@ -156,9 +156,6 @@ def test_powershell_launcher_waits_for_migration(tmp_path, supports_ready_protoc
         "identity = f'{os.getpid()}|{nonce}' if nonce else str(os.getpid())\n"
         "if nonce:\n"
         "    (bridge / 'daemon.lock').write_text(identity)\n"
-        "else:\n"
-        "    (bridge / 'daemon.lock').write_text(identity)\n"
-        "    os.utime(bridge / 'daemon.lock', (1, 1))\n"
         "time.sleep(10.25)\n"
         "Path(os.environ['MIGRATION_FILE']).write_text('migrated')\n"
         "if not nonce:\n"
@@ -173,12 +170,18 @@ def test_powershell_launcher_waits_for_migration(tmp_path, supports_ready_protoc
         shutil.copy2(ROOT / "daemon-capabilities.json", backend)
     windows_path = prepare_fake_windows_backend_runtime(backend, tmp_path)
     migration_file = tmp_path / "migration-complete"
+    bridge = tmp_path / "bridge"
+    if not supports_ready_protocol:
+        bridge.mkdir()
+        stale_lock = bridge / "daemon.lock"
+        stale_lock.write_text("1234", encoding="utf-8")
+        os.utime(stale_lock, (4_102_444_800, 4_102_444_800))
     env = os.environ | {
         "LOCALAPPDATA": str(local_app_data),
         "MIGRATION_FILE": str(migration_file),
         "PATH": windows_path,
         "RC_AUTO_UPDATE": "0",
-        "RC_BRIDGE_DIR": str(tmp_path / "bridge"),
+        "RC_BRIDGE_DIR": str(bridge),
     }
 
     return_code, launcher_log = run_windows_launcher(
