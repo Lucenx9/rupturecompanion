@@ -41,8 +41,10 @@ if [[ -f "$data_dir/backend/daemon.py" ]]; then
     fi
 fi
 daemon_ready_protocol=0
+daemon_ready_nonce=""
 if grep -Fq 'READY_PROTOCOL_VERSION = 1' "$backend_dir/daemon.py"; then
     daemon_ready_protocol=1
+    daemon_ready_nonce="$$-$RANDOM-$RANDOM-$(date +%s%N)"
 fi
 
 if [[ -z "${RC_BRIDGE_DIR:-}" ]]; then
@@ -65,35 +67,33 @@ start_daemon() {
         exec setsid env -u LD_LIBRARY_PATH -u LD_PRELOAD -u QT_QPA_PLATFORM \
             PYTHONUNBUFFERED=1 RC_BRIDGE_DIR="$RC_BRIDGE_DIR" \
             RC_DAEMON_READY_PROTOCOL="$daemon_ready_protocol" \
+            RC_DAEMON_READY_NONCE="$daemon_ready_nonce" \
             "$python" "$backend_dir/daemon.py"
     ) >>"$log_file" 2>&1 &
     daemon_pid=$!
 }
 
 wait_for_daemon() {
-    local lock_pid=""
-    local ready_pid=""
-    local startup_attempts=0
-    local daemon_live=0
-    while kill -0 "$daemon_pid" 2>/dev/null; do
-        lock_pid=""
+    local expected_identity="$daemon_pid"
+    local lock_identity=""
+    local ready_identity=""
+    if (( daemon_ready_protocol )); then
+        expected_identity="$daemon_pid|$daemon_ready_nonce"
+    fi
+    for _ in {1..2400}; do
+        kill -0 "$daemon_pid" 2>/dev/null || return 1
+        lock_identity=""
         if [[ -f "$lock_file" ]]; then
-            read -r lock_pid < "$lock_file" || true
+            read -r lock_identity < "$lock_file" || true
         fi
-        if [[ "$lock_pid" == "$daemon_pid" ]] \
-                && kill -0 "$daemon_pid" 2>/dev/null \
+        if [[ "$lock_identity" == "$expected_identity" ]] \
                 && ! flock -n "$lock_file" -c true 2>/dev/null; then
-            daemon_live=1
             (( daemon_ready_protocol )) || return 0
-            ready_pid=""
+            ready_identity=""
             if [[ -f "$ready_file" ]]; then
-                read -r ready_pid < "$ready_file" || true
+                read -r ready_identity < "$ready_file" || true
             fi
-            [[ "$ready_pid" == "$daemon_pid" ]] && return 0
-        fi
-        if (( ! daemon_live )); then
-            (( startup_attempts += 1 ))
-            (( startup_attempts < 200 )) || return 1
+            [[ "$ready_identity" == "$expected_identity" ]] && return 0
         fi
         sleep 0.05
     done
@@ -126,6 +126,7 @@ trap 'if [[ -n "$game_pid" ]]; then kill -TERM "$game_pid" 2>/dev/null || true; 
 
 start_daemon
 if ! wait_for_daemon; then
+    stop_daemon
     "$bootstrap_python" "$companion_dir/updater.py" --rollback \
         2>>"$log_file" || true
     echo "Companion daemon did not start; check $log_file" >&2
@@ -153,6 +154,7 @@ while true; do
     echo "Daemon stopped unexpectedly; restarting" >>"$log_file"
     start_daemon
     if ! wait_for_daemon; then
+        stop_daemon
         "$bootstrap_python" "$companion_dir/updater.py" --rollback \
             2>>"$log_file" || true
         echo "Companion daemon is unavailable; check $log_file" >&2

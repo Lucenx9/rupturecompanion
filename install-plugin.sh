@@ -87,7 +87,8 @@ if [[ -f "$rollback_dll" ]]; then
                 "$installed_sidecar"; then
         rm -f -- "$rollback_dll"
     else
-        cp -p -- "$rollback_dll" "$installed_dll"
+        cp -p -- "$rollback_dll" "$rollback_prepare"
+        mv -f -- "$rollback_prepare" "$installed_dll"
     fi
 fi
 install -m 0644 "$temporary/RuptureCompanion.dll" "$staged_dll"

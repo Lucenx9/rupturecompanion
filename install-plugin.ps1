@@ -140,7 +140,10 @@ try {
         if ($InstalledManifestUrl -eq $ManifestUrl) {
             Remove-Item -LiteralPath $RollbackDll -Force
         } else {
-            Copy-Item -LiteralPath $RollbackDll -Destination $InstalledDll -Force
+            Copy-Item -LiteralPath $RollbackDll `
+                -Destination $RollbackPrepare -Force
+            Move-Item -LiteralPath $RollbackPrepare `
+                -Destination $InstalledDll -Force
         }
     }
     Copy-Item -LiteralPath $DownloadedDll -Destination $StagedDll

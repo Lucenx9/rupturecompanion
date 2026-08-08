@@ -40,7 +40,13 @@ if (Select-String -LiteralPath (Join-Path $BackendDir "daemon.py") `
     -SimpleMatch "READY_PROTOCOL_VERSION = 1" -Quiet) {
     $DaemonReadyProtocol = 1
 }
+$DaemonReadyNonce = if ($DaemonReadyProtocol -eq 1) {
+    [guid]::NewGuid().ToString("N")
+} else {
+    ""
+}
 $env:RC_DAEMON_READY_PROTOCOL = [string]$DaemonReadyProtocol
+$env:RC_DAEMON_READY_NONCE = $DaemonReadyNonce
 
 if ($env:RC_BRIDGE_DIR) {
     $BridgeDir = $env:RC_BRIDGE_DIR
@@ -68,32 +74,37 @@ function Start-CompanionDaemon {
         -RedirectStandardError (Join-Path $StateDir "daemon-error.log")
 }
 
+function Read-CompanionState {
+    param([string]$Path)
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            return ([System.IO.File]::ReadAllText($Path)).Trim()
+        }
+    } catch {
+    }
+    return $null
+}
+
 function Wait-CompanionDaemon {
     param([System.Diagnostics.Process]$Process)
     $lockFile = Join-Path $BridgeDir "daemon.lock"
     $readyFile = Join-Path $BridgeDir "daemon.ready"
-    $startupAttempts = 0
-    $daemonLive = $false
-    while ($true) {
+    $expectedIdentity = [string]$Process.Id
+    if ($DaemonReadyProtocol -eq 1) {
+        $expectedIdentity += "|$DaemonReadyNonce"
+    }
+    for ($attempt = 0; $attempt -lt 2400; $attempt++) {
         $Process.Refresh()
         if ($Process.HasExited) { return $false }
-        if (Test-Path -LiteralPath $lockFile) {
-            $lockPid = ([System.IO.File]::ReadAllText($lockFile)).Trim()
-            if ($lockPid -eq [string]$Process.Id) {
-                $daemonLive = $true
-                if ($DaemonReadyProtocol -ne 1) { return $true }
-                if (Test-Path -LiteralPath $readyFile) {
-                    $readyPid = ([System.IO.File]::ReadAllText($readyFile)).Trim()
-                    if ($readyPid -eq [string]$Process.Id) { return $true }
-                }
-            }
-        }
-        if (-not $daemonLive) {
-            $startupAttempts++
-            if ($startupAttempts -ge 200) { return $false }
+        $lockIdentity = Read-CompanionState $lockFile
+        if ($lockIdentity -eq $expectedIdentity) {
+            if ($DaemonReadyProtocol -ne 1) { return $true }
+            $readyIdentity = Read-CompanionState $readyFile
+            if ($readyIdentity -eq $expectedIdentity) { return $true }
         }
         Start-Sleep -Milliseconds 50
     }
+    return $false
 }
 
 function ConvertTo-NativeArgument {
@@ -126,6 +137,8 @@ $Daemon = Start-CompanionDaemon
 $Game = $null
 try {
     if (-not (Wait-CompanionDaemon $Daemon)) {
+        Stop-ProcessTree $Daemon
+        $Daemon = $null
         & $BootstrapPython (Join-Path $PSScriptRoot "updater.py") --rollback 2>> `
             (Join-Path $StateDir "updater.log")
         throw "Companion daemon did not start. Check $StateDir."

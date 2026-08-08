@@ -33,10 +33,12 @@ def test_launcher_waits_for_daemon_readiness_before_starting_game(
         'exec 9> "$RC_BRIDGE_DIR/daemon.lock"\n'
         "flock -n 9 || exit 0\n"
         'if [[ "$RC_DAEMON_READY_PROTOCOL" == 1 ]]; then\n'
-        '  echo $$ > "$RC_BRIDGE_DIR/daemon.lock"\n'
+        '  [[ -n "$RC_DAEMON_READY_NONCE" ]] || exit 11\n'
+        '  identity="$$|$RC_DAEMON_READY_NONCE"\n'
+        '  echo "$identity" > "$RC_BRIDGE_DIR/daemon.lock"\n'
         "  sleep 0.25\n"
         '  printf migrated > "$MIGRATION_FILE"\n'
-        '  echo $$ > "$RC_BRIDGE_DIR/daemon.ready"\n'
+        '  echo "$identity" > "$RC_BRIDGE_DIR/daemon.ready"\n'
         "else\n"
         "  sleep 0.25\n"
         '  printf migrated > "$MIGRATION_FILE"\n'
