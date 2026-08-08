@@ -15,11 +15,15 @@ def make_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
-def prepare_fake_windows_backend_runtime(backend: Path, tmp_path: Path) -> str:
-    scripts = backend / ".venv/Scripts"
+def prepare_windows_python_runtime(project: Path) -> None:
+    scripts = project / ".venv/Scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(ROOT / ".venv/Scripts/python.exe", scripts)
-    shutil.copy2(ROOT / ".venv/pyvenv.cfg", backend / ".venv")
+    shutil.copy2(ROOT / ".venv/pyvenv.cfg", project / ".venv")
+
+
+def prepare_fake_windows_backend_runtime(backend: Path, tmp_path: Path) -> str:
+    prepare_windows_python_runtime(backend)
     tools = tmp_path / "tools"
     tools.mkdir()
     (tools / "uv.cmd").write_text("@exit /b 0\r\n", encoding="utf-8")
@@ -268,6 +272,25 @@ def test_powershell_launcher_rolls_back_backend_when_uv_is_missing(tmp_path):
     command_prompt = shutil.which("cmd.exe")
     assert powershell is not None
     assert command_prompt is not None
+    companion = tmp_path / "companion"
+    companion.mkdir()
+    prepare_windows_python_runtime(companion)
+    shutil.copy2(ROOT / "run-with-companion.ps1", companion)
+    shutil.copy2(ROOT / "updater.py", companion)
+    shutil.copy2(ROOT / "daemon-capabilities.json", companion)
+    (companion / "daemon.py").write_text(
+        "import os\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "bridge = Path(os.environ['RC_BRIDGE_DIR'])\n"
+        "bridge.mkdir(parents=True, exist_ok=True)\n"
+        "identity = f\"{os.getpid()}|{os.environ['RC_DAEMON_READY_NONCE']}\"\n"
+        "(bridge / 'daemon.lock').write_text(identity)\n"
+        "(bridge / 'daemon.ready').write_text(identity)\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n",
+        encoding="utf-8",
+    )
     local_app_data = tmp_path / "local-app-data"
     backend = local_app_data / "RuptureCompanion/backend"
     backend_python = backend / ".venv/Scripts/python.exe"
@@ -294,7 +317,7 @@ def test_powershell_launcher_rolls_back_backend_when_uv_is_missing(tmp_path):
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            str(ROOT / "run-with-companion.ps1"),
+            str(companion / "run-with-companion.ps1"),
             command_prompt,
             "/d",
             "/c",

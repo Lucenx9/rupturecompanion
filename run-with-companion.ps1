@@ -31,7 +31,7 @@ if (Test-Path -LiteralPath (Join-Path $BackendDir "daemon.py")) {
     $SyncExitCode = 1
     try {
         $UvCommand = Get-Command uv -CommandType Application `
-            -ErrorAction SilentlyContinue
+            -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($UvCommand) {
             & $UvCommand.Source sync --project $BackendDir --locked --no-dev 2>> `
                 (Join-Path $StateDir "updater.log")
