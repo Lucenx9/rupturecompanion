@@ -17,6 +17,7 @@ REQUIRED_FILES = (
     "screenshot.py",
     "plugin_updater.py",
     "updater.py",
+    "daemon-capabilities.json",
     "VERSION",
 )
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024

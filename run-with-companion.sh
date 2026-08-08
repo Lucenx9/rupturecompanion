@@ -40,6 +40,19 @@ if [[ -f "$data_dir/backend/daemon.py" ]]; then
             2>>"$log_file" || true
     fi
 fi
+daemon_ready_protocol=0
+daemon_ready_nonce=""
+capabilities_file="$backend_dir/daemon-capabilities.json"
+ready_protocol="$("$python" -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as capabilities:
+    print(json.load(capabilities).get("ready_protocol", 0))
+' "$capabilities_file" 2>/dev/null || true)"
+if [[ "$ready_protocol" == 1 ]]; then
+    daemon_ready_protocol=1
+fi
 
 if [[ -z "${RC_BRIDGE_DIR:-}" ]]; then
     if [[ -n "${STEAM_COMPAT_INSTALL_PATH:-}" ]]; then
@@ -51,31 +64,49 @@ fi
 export RC_BRIDGE_DIR
 mkdir -p "$RC_BRIDGE_DIR"
 lock_file="$RC_BRIDGE_DIR/daemon.lock"
+ready_file="$RC_BRIDGE_DIR/daemon.ready"
 daemon_pid=""
 game_pid=""
 
 start_daemon() {
+    if (( daemon_ready_protocol )); then
+        daemon_ready_nonce="$$-$RANDOM-$RANDOM-$(date +%s%N)"
+    else
+        daemon_ready_nonce=""
+    fi
     (
         cd "$backend_dir" || exit 1
         exec setsid env -u LD_LIBRARY_PATH -u LD_PRELOAD -u QT_QPA_PLATFORM \
             PYTHONUNBUFFERED=1 RC_BRIDGE_DIR="$RC_BRIDGE_DIR" \
+            RC_DAEMON_READY_PROTOCOL="$daemon_ready_protocol" \
+            RC_DAEMON_READY_NONCE="$daemon_ready_nonce" \
             "$python" "$backend_dir/daemon.py"
     ) >>"$log_file" 2>&1 &
     daemon_pid=$!
 }
 
 wait_for_daemon() {
-    local lock_pid=""
-    for _ in {1..200}; do
-        if [[ -f "$lock_file" ]]; then
-            read -r lock_pid < "$lock_file" || true
-        fi
-        if [[ "$lock_pid" == "$daemon_pid" ]] \
-                && kill -0 "$daemon_pid" 2>/dev/null \
-                && ! flock -n "$lock_file" -c true 2>/dev/null; then
-            return 0
-        fi
+    local expected_identity="$daemon_pid"
+    local lock_identity=""
+    local ready_identity=""
+    if (( daemon_ready_protocol )); then
+        expected_identity="$daemon_pid|$daemon_ready_nonce"
+    fi
+    for _ in {1..2400}; do
         kill -0 "$daemon_pid" 2>/dev/null || return 1
+        lock_identity=""
+        if [[ -f "$lock_file" ]]; then
+            read -r lock_identity < "$lock_file" || true
+        fi
+        if [[ "$lock_identity" == "$expected_identity" ]] \
+                && ! flock -n "$lock_file" -c true 2>/dev/null; then
+            (( daemon_ready_protocol )) || return 0
+            ready_identity=""
+            if [[ -f "$ready_file" ]]; then
+                read -r ready_identity < "$ready_file" || true
+            fi
+            [[ "$ready_identity" == "$expected_identity" ]] && return 0
+        fi
         sleep 0.05
     done
     return 1
@@ -107,6 +138,7 @@ trap 'if [[ -n "$game_pid" ]]; then kill -TERM "$game_pid" 2>/dev/null || true; 
 
 start_daemon
 if ! wait_for_daemon; then
+    stop_daemon
     "$bootstrap_python" "$companion_dir/updater.py" --rollback \
         2>>"$log_file" || true
     echo "Companion daemon did not start; check $log_file" >&2
@@ -134,6 +166,7 @@ while true; do
     echo "Daemon stopped unexpectedly; restarting" >>"$log_file"
     start_daemon
     if ! wait_for_daemon; then
+        stop_daemon
         "$bootstrap_python" "$companion_dir/updater.py" --rollback \
             2>>"$log_file" || true
         echo "Companion daemon is unavailable; check $log_file" >&2

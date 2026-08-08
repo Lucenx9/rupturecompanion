@@ -28,6 +28,7 @@ def test_extract_backend_accepts_complete_release(tmp_path):
             "plugin_updater.py": "plugin_updater = True",
             "screenshot.py": "screenshot",
             "updater.py": "updater",
+            "daemon-capabilities.json": '{"ready_protocol": 1}',
             "VERSION": "v0.1.0\n",
         },
     )
@@ -57,6 +58,7 @@ def test_extract_backend_rejects_invalid_python(tmp_path):
             "plugin_updater.py": "plugin_updater = True",
             "screenshot.py": "screenshot = True",
             "updater.py": "updater = True",
+            "daemon-capabilities.json": '{"ready_protocol": 1}',
             "VERSION": "v0.1.0\n",
         },
     )
@@ -158,6 +160,7 @@ def test_update_backend_installs_release_and_keeps_rollback(tmp_path, monkeypatc
                 "plugin_updater.py": "plugin_updater = True",
                 "screenshot.py": "screenshot = True",
                 "updater.py": "updater = True",
+                "daemon-capabilities.json": '{"ready_protocol": 1}',
                 "VERSION": "v0.2.0\n",
             },
         )

@@ -110,7 +110,10 @@ compatible release channel. A failed sidecar commit rolls the DLL back; an
 interrupted rollback keeps its recovery copy for the next launch. Incomplete
 migrations are detected and retried before the game starts. The first launch
 after a loader update may be needed to record its new interface; the next
-launch performs the migration.
+launch performs the migration. Current launchers distinguish daemon liveness
+from migration readiness and wait up to two minutes. When an independently
+updated backend is started by an older launcher, migration gets a short grace
+period and then defers without blocking the game; a later launch retries it.
 If GitHub is unavailable, the last valid downloaded backend—or the checked-out
 copy—is used. Its locked production environment is synchronized automatically,
 so backend dependency changes are included in updates. Set `RC_AUTO_UPDATE=0`

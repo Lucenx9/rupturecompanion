@@ -4,6 +4,11 @@ set -euo pipefail
 
 default_game_root="/mnt/storage/SteamLibrary/steamapps/common/StarRupture"
 game_root="${RC_GAME_DIR:-${1:-$default_game_root}}"
+installer_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+installer_python="$installer_dir/.venv/bin/python"
+if [[ ! -x "$installer_python" ]]; then
+    installer_python="$(command -v python3 || true)"
+fi
 binary_dir="$game_root/StarRupture/Binaries/Win64"
 plugin_dir="$binary_dir/ModLoader/Plugins"
 log_dir="$binary_dir/ModLoader/Logs"
@@ -21,6 +26,10 @@ if [[ ! -f "$binary_dir/dwmapi.dll" || ! -d "$plugin_dir" ]]; then
 fi
 if ! command -v curl >/dev/null 2>&1; then
     echo "curl is required" >&2
+    exit 1
+fi
+if [[ -z "$installer_python" ]]; then
+    echo "Python 3 is required" >&2
     exit 1
 fi
 
@@ -81,8 +90,24 @@ if [[ "$(od -An -N2 -tc "$temporary/RuptureCompanion.dll" | tr -d ' ')" != "MZ" 
     exit 1
 fi
 
+installed_manifest=""
+if [[ -f "$installed_sidecar" ]]; then
+    installed_manifest="$("$installer_python" -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as sidecar:
+    value = json.load(sidecar).get("manifest_url", "")
+print(value if isinstance(value, str) else "")
+' "$installed_sidecar" 2>/dev/null || true)"
+fi
 if [[ -f "$rollback_dll" ]]; then
-    mv -f -- "$rollback_dll" "$installed_dll"
+    if [[ "$installed_manifest" == "$manifest_url" ]]; then
+        rm -f -- "$rollback_dll"
+    else
+        cp -p -- "$rollback_dll" "$rollback_prepare"
+        mv -f -- "$rollback_prepare" "$installed_dll"
+    fi
 fi
 install -m 0644 "$temporary/RuptureCompanion.dll" "$staged_dll"
 printf '{\n  "manifest_url": "%s"\n}\n' "$manifest_url" \
@@ -122,7 +147,7 @@ if [[ "${RC_ENABLE_AUTO_UPDATE:-1}" == "1" && -f "$config_file" ]]; then
     auto_update_status="Mod Loader plugin auto-update is enabled."
 fi
 
-launcher="$(realpath "$(dirname -- "${BASH_SOURCE[0]}")/run-with-companion.sh")"
+launcher="$(realpath "$installer_dir/run-with-companion.sh")"
 echo "Installed RuptureCompanion.dll ($variant) in $plugin_dir"
 echo "$auto_update_status"
 echo "Use this Steam launch option:"

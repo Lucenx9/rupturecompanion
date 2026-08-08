@@ -23,9 +23,27 @@ New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 $BackendDir = Join-Path $DataDir "backend"
 $BackendPython = Join-Path $BackendDir ".venv\Scripts\python.exe"
 if (Test-Path -LiteralPath (Join-Path $BackendDir "daemon.py")) {
-    & uv sync --project $BackendDir --locked --no-dev 2>> `
-        (Join-Path $StateDir "updater.log")
-    if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $BackendPython)) {
+    $HadActiveVirtualEnv = Test-Path Env:VIRTUAL_ENV
+    $ActiveVirtualEnv = $env:VIRTUAL_ENV
+    Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $SyncExitCode = 1
+    try {
+        $UvCommand = Get-Command uv -CommandType Application `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($UvCommand) {
+            & $UvCommand.Source sync --project $BackendDir --locked --no-dev 2>> `
+                (Join-Path $StateDir "updater.log")
+            $SyncExitCode = $LASTEXITCODE
+        }
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+        if ($HadActiveVirtualEnv) {
+            $env:VIRTUAL_ENV = $ActiveVirtualEnv
+        }
+    }
+    if ($SyncExitCode -eq 0 -and (Test-Path -LiteralPath $BackendPython)) {
         $Python = $BackendPython
     } else {
         & $BootstrapPython (Join-Path $PSScriptRoot "updater.py") --rollback 2>> `
@@ -35,6 +53,17 @@ if (Test-Path -LiteralPath (Join-Path $BackendDir "daemon.py")) {
 } else {
     $BackendDir = $PSScriptRoot
 }
+$DaemonReadyProtocol = 0
+try {
+    $Capabilities = [System.IO.File]::ReadAllText(
+        (Join-Path $BackendDir "daemon-capabilities.json")
+    ) | ConvertFrom-Json
+    if ($Capabilities.ready_protocol -eq 1) {
+        $DaemonReadyProtocol = 1
+    }
+} catch {
+}
+$DaemonReadyNonce = ""
 
 if ($env:RC_BRIDGE_DIR) {
     $BridgeDir = $env:RC_BRIDGE_DIR
@@ -53,7 +82,44 @@ function Stop-ProcessTree {
     }
 }
 
+function Reset-LegacyCompanionState {
+    $lockFile = Join-Path $BridgeDir "daemon.lock"
+    $stream = $null
+    $locked = $false
+    try {
+        $stream = [System.IO.File]::Open(
+            $lockFile,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::ReadWrite
+        )
+        $stream.Lock(0, 1)
+        $locked = $true
+        $sentinel = [System.Text.Encoding]::UTF8.GetBytes(
+            "starting-$([guid]::NewGuid().ToString('N'))"
+        )
+        $stream.SetLength(0)
+        $stream.Write($sentinel, 0, $sentinel.Length)
+        $stream.Flush()
+    } catch {
+        throw "Could not prepare the legacy daemon state; another daemon may be running."
+    } finally {
+        if ($locked) { $stream.Unlock(0, 1) }
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
 function Start-CompanionDaemon {
+    $script:DaemonReadyNonce = if ($DaemonReadyProtocol -eq 1) {
+        [guid]::NewGuid().ToString("N")
+    } else {
+        ""
+    }
+    $env:RC_DAEMON_READY_PROTOCOL = [string]$DaemonReadyProtocol
+    $env:RC_DAEMON_READY_NONCE = $DaemonReadyNonce
+    if ($DaemonReadyProtocol -ne 1) {
+        Reset-LegacyCompanionState
+    }
     $daemonScript = Join-Path $BackendDir "daemon.py"
     $daemonArgument = '"' + $daemonScript.Replace('"', '\"') + '"'
     return Start-Process -FilePath $Python -ArgumentList $daemonArgument `
@@ -62,15 +128,31 @@ function Start-CompanionDaemon {
         -RedirectStandardError (Join-Path $StateDir "daemon-error.log")
 }
 
+function Read-CompanionState {
+    param([string]$Path)
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            return ([System.IO.File]::ReadAllText($Path)).Trim()
+        }
+    } catch {
+    }
+    return $null
+}
+
 function Wait-CompanionDaemon {
     param([System.Diagnostics.Process]$Process)
     $lockFile = Join-Path $BridgeDir "daemon.lock"
-    for ($attempt = 0; $attempt -lt 200; $attempt++) {
+    $readyFile = Join-Path $BridgeDir "daemon.ready"
+    $readyIdentityPattern = '^\d+\|' + [regex]::Escape($DaemonReadyNonce) + '$'
+    for ($attempt = 0; $attempt -lt 2400; $attempt++) {
         $Process.Refresh()
         if ($Process.HasExited) { return $false }
-        if (Test-Path -LiteralPath $lockFile) {
-            $lockPid = ([System.IO.File]::ReadAllText($lockFile)).Trim()
-            if ($lockPid -eq [string]$Process.Id) { return $true }
+        $lockIdentity = Read-CompanionState $lockFile
+        if ($DaemonReadyProtocol -ne 1) {
+            if ($lockIdentity -match '^\d+$') { return $true }
+        } elseif ($lockIdentity -match $readyIdentityPattern) {
+            $readyIdentity = Read-CompanionState $readyFile
+            if ($readyIdentity -eq $lockIdentity) { return $true }
         }
         Start-Sleep -Milliseconds 50
     }
@@ -107,6 +189,8 @@ $Daemon = Start-CompanionDaemon
 $Game = $null
 try {
     if (-not (Wait-CompanionDaemon $Daemon)) {
+        Stop-ProcessTree $Daemon
+        $Daemon = $null
         & $BootstrapPython (Join-Path $PSScriptRoot "updater.py") --rollback 2>> `
             (Join-Path $StateDir "updater.log")
         throw "Companion daemon did not start. Check $StateDir."
