@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2317,SC2329
 # Keep the companion daemon alive for exactly the lifetime of the Steam command.
 set -uo pipefail
 
