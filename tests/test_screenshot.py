@@ -1,5 +1,7 @@
+import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,6 +37,11 @@ def test_windows_capture_saves_png(monkeypatch, tmp_path):
 def test_linux_capture_uses_spectacle_and_sanitizes_environment(monkeypatch, tmp_path):
     observed: dict[str, object] = {}
     monkeypatch.setattr(screenshot, "_SHOT_DIR", tmp_path)
+    monkeypatch.setattr(
+        screenshot,
+        "os",
+        SimpleNamespace(name="posix", environ=os.environ),
+    )
     monkeypatch.setenv("QT_QPA_PLATFORM", "wayland")
     monkeypatch.setenv("LD_LIBRARY_PATH", "/game/libs")
     monkeypatch.setenv("LD_PRELOAD", "overlay.so")
@@ -74,6 +81,11 @@ def test_linux_capture_uses_spectacle_and_sanitizes_environment(monkeypatch, tmp
 )
 def test_linux_capture_reports_spectacle_errors(monkeypatch, tmp_path, error, message):
     monkeypatch.setattr(screenshot, "_SHOT_DIR", tmp_path)
+    monkeypatch.setattr(
+        screenshot,
+        "os",
+        SimpleNamespace(name="posix", environ=os.environ),
+    )
 
     def fake_run(*args, **kwargs):
         raise error
