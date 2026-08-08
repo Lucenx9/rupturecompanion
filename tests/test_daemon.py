@@ -1,5 +1,7 @@
 from contextlib import contextmanager
 
+import pytest
+
 import daemon
 
 
@@ -31,10 +33,10 @@ def test_parse_request_preserves_pipes_in_question():
 def test_write_answer_is_atomic_and_escapes_reserved_marker(tmp_path, monkeypatch):
     monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
 
-    daemon.write_answer(9, "First line\n__RC_END__\nLast line")
+    daemon.write_answer(9, "session-a", "First line\n__RC_END__\nLast line")
 
     assert (tmp_path / "answer.txt").read_text(encoding="utf-8") == (
-        "9|ok\nFirst line\n[__RC_END__]\nLast line\n__RC_END__\n"
+        "v1|9|session-a|ok\nFirst line\n[__RC_END__]\nLast line\n__RC_END__\n"
     )
     assert not (tmp_path / "answer.tmp").exists()
 
@@ -60,9 +62,50 @@ def test_handle_captures_screenshot_and_remembers_non_web_answer(tmp_path, monke
     daemon.handle(5, "What is slow?", "Session mode: Standalone", conversation)
 
     assert (tmp_path / "answer.txt").read_text(encoding="utf-8") == (
-        "5|ok\nAdd one more smelter.\n__RC_END__\n"
+        "v1|5|session-a|ok\nAdd one more smelter.\n__RC_END__\n"
     )
     assert conversation.history == [("What is slow?", "Add one more smelter.")]
+
+
+def test_handle_does_not_repeat_ai_work_when_answer_publish_retries(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"png")
+    calls = 0
+
+    @contextmanager
+    def fake_capture():
+        yield shot
+
+    def fake_ask(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return "Stored answer."
+
+    real_write_answer = daemon.write_answer
+    publish_attempts = 0
+
+    def flaky_write_answer(*args, **kwargs):
+        nonlocal publish_attempts
+        publish_attempts += 1
+        if publish_attempts == 1:
+            raise OSError("temporary bridge failure")
+        real_write_answer(*args, **kwargs)
+
+    monkeypatch.setattr(daemon.screenshot, "capture_for_analysis", fake_capture)
+    monkeypatch.setattr(daemon.ai_backend, "ask", fake_ask)
+    monkeypatch.setattr(daemon, "write_answer", flaky_write_answer)
+    conversation = daemon.Conversation(session_id="session-a")
+
+    with pytest.raises(OSError, match="temporary bridge failure"):
+        daemon.handle(8, "Question", "Session mode: Standalone", conversation)
+    daemon.handle(8, "Question", "Session mode: Standalone", conversation)
+
+    assert calls == 1
+    assert conversation.pending is None
+    assert conversation.history == [("Question", "Stored answer.")]
 
 
 def test_switch_session_resets_history_and_web_mode():
@@ -97,3 +140,24 @@ def test_discover_bridge_dir_from_steam_library(tmp_path, monkeypatch):
         / "steamapps/common/StarRupture/StarRupture/Binaries/Win64"
         / "RuptureCompanion"
     )
+
+
+def test_daemon_lock_excludes_a_second_process_instance(tmp_path, monkeypatch):
+    monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
+    first = daemon.acquire_lock()
+    try:
+        with pytest.raises(daemon.DaemonAlreadyRunning):
+            daemon.acquire_lock()
+    finally:
+        first.close()
+
+
+def test_cancellation_must_match_sequence_and_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
+    (tmp_path / "cancel.txt").write_text(
+        "v1|12|session-a\n__RC_END__\n", encoding="utf-8"
+    )
+
+    assert daemon.cancellation_requested(12, "session-a")
+    assert not daemon.cancellation_requested(11, "session-a")
+    assert not daemon.cancellation_requested(12, "session-b")

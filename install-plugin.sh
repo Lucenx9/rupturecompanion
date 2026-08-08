@@ -77,6 +77,7 @@ printf '{\n  "manifest_url": "%s"\n}\n' "$manifest_url" \
     >"$plugin_dir/RuptureCompanion.json"
 mkdir -p "$binary_dir/RuptureCompanion"
 
+auto_update_status="Mod Loader plugin auto-update was left unchanged."
 if [[ "${RC_ENABLE_AUTO_UPDATE:-1}" == "1" && -f "$config_file" ]]; then
     awk '
         /^\[AutoUpdate\][[:space:]]*$/ { in_auto_update=1; print; next }
@@ -89,11 +90,11 @@ if [[ "${RC_ENABLE_AUTO_UPDATE:-1}" == "1" && -f "$config_file" ]]; then
         exit 1
     }
     install -m 0644 "$temporary/modloader.ini" "$config_file"
+    auto_update_status="Mod Loader plugin auto-update is enabled."
 fi
 
 launcher="$(realpath "$(dirname -- "${BASH_SOURCE[0]}")/run-with-companion.sh")"
 echo "Installed RuptureCompanion.dll ($variant) in $plugin_dir"
-echo "Mod Loader plugin auto-update is enabled."
+echo "$auto_update_status"
 echo "Use this Steam launch option:"
 echo "WINEDLLOVERRIDES=\"dwmapi=n,b\" $launcher %command%"
-

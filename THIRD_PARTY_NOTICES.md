@@ -7,4 +7,3 @@ project's MIT license.
 
 Rupture Companion does not include the StarRupture game, the Mod Loader binary,
 or generated game SDK assets.
-

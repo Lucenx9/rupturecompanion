@@ -7,9 +7,12 @@ on:
     paths-ignore:
       - "**/*.md"
 
+permissions:
+  contents: write
+
 jobs:
   release:
-    uses: AlienXAXS/StarRupture-Plugin-SDK/.github/workflows/plugin-release.yml@main
+    uses: AlienXAXS/StarRupture-Plugin-SDK/.github/workflows/plugin-release.yml@v1.17.3
     with:
       plugin_name: RuptureCompanion
       solution_file: RuptureCompanion.sln
@@ -79,8 +82,7 @@ jobs:
         run: |
           tag="$(gh release view --json tagName --jq .tagName)"
           staging="$(mktemp -d)"
-          cp ai_backend.py daemon.py screenshot.py pyproject.toml uv.lock "$staging/"
+          cp ai_backend.py daemon.py screenshot.py updater.py pyproject.toml uv.lock "$staging/"
           printf '%s\n' "$tag" > "$staging/VERSION"
           tar -C "$staging" -czf RuptureCompanion-Backend.tar.gz .
           gh release upload "$tag" RuptureCompanion-Backend.tar.gz --clobber
-

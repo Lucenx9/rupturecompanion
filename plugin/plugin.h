@@ -8,4 +8,3 @@ __declspec(dllexport) PluginInfo* GetPluginInfo();
 __declspec(dllexport) bool PluginInit(IPluginSelf* self);
 __declspec(dllexport) void PluginShutdown();
 }
-

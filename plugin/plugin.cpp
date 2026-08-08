@@ -144,19 +144,34 @@ std::string NewSessionId()
 
 void ResetConversation()
 {
-    std::scoped_lock lock(g_chat.mutex);
-    ++g_chat.sequence;
-    g_chat.sessionId = NewSessionId();
-    g_chat.messages.clear();
-    g_chat.status = "Ready";
-    g_chat.lastQuestion.clear();
-    g_chat.waiting = false;
-    g_chat.canRetry = false;
-    g_chat.unread = false;
-    AddMessageLocked(
-        Message::Author::Companion,
-        "Ask about what is on screen, your next production step, a recipe, or a "
-        "current patch. Use /web off to keep a conversation offline.");
+    std::uint64_t canceledSequence = 0;
+    std::string canceledSession;
+    {
+        std::scoped_lock lock(g_chat.mutex);
+        if (g_chat.waiting)
+        {
+            canceledSequence = g_chat.sequence;
+            canceledSession = g_chat.sessionId;
+        }
+        ++g_chat.sequence;
+        g_chat.sessionId = NewSessionId();
+        g_chat.messages.clear();
+        g_chat.status = "Ready";
+        g_chat.lastQuestion.clear();
+        g_chat.waiting = false;
+        g_chat.canRetry = false;
+        g_chat.unread = false;
+        AddMessageLocked(
+            Message::Author::Companion,
+            "Ask about what is on screen, your next production step, a recipe, or a "
+            "current patch. Use /web off to keep a conversation offline.");
+    }
+    if (canceledSequence != 0)
+    {
+        std::string ignoredError;
+        RuptureCompanion::Bridge::WriteCancellation(
+            canceledSequence, canceledSession, ignoredError);
+    }
 }
 
 std::string SessionContext()
@@ -234,12 +249,14 @@ void PollLoop(const std::stop_token stopToken)
     while (!stopToken.stop_requested())
     {
         std::uint64_t expectedSequence = 0;
+        std::string expectedSession;
         std::chrono::steady_clock::time_point waitingSince;
         {
             std::scoped_lock lock(g_chat.mutex);
             if (g_chat.waiting)
             {
                 expectedSequence = g_chat.sequence;
+                expectedSession = g_chat.sessionId;
                 waitingSince = g_chat.waitingSince;
             }
         }
@@ -249,7 +266,8 @@ void PollLoop(const std::stop_token stopToken)
             try
             {
                 const auto response = RuptureCompanion::Bridge::ReadResponse();
-                if (response.has_value() && response->sequence == expectedSequence)
+                if (response.has_value() && response->sequence == expectedSequence
+                    && response->sessionId == expectedSession)
                 {
                     std::scoped_lock lock(g_chat.mutex);
                     if (g_chat.waiting && g_chat.sequence == expectedSequence)
@@ -316,15 +334,26 @@ void OnPanelClosed(const PanelHandle handle)
 
 void CancelWaiting()
 {
-    std::scoped_lock lock(g_chat.mutex);
-    if (!g_chat.waiting)
+    std::uint64_t sequence = 0;
+    std::string sessionId;
     {
-        return;
+        std::scoped_lock lock(g_chat.mutex);
+        if (!g_chat.waiting)
+        {
+            return;
+        }
+        sequence = g_chat.sequence;
+        sessionId = g_chat.sessionId;
+        ++g_chat.sequence;
+        g_chat.waiting = false;
+        g_chat.canRetry = true;
+        g_chat.status = "Request canceled";
     }
-    ++g_chat.sequence;
-    g_chat.waiting = false;
-    g_chat.canRetry = true;
-    g_chat.status = "Request canceled";
+    std::string error;
+    if (!RuptureCompanion::Bridge::WriteCancellation(sequence, sessionId, error))
+    {
+        LogError(error.c_str());
+    }
 }
 
 void RenderPanel(IModLoaderImGui* ui)

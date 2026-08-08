@@ -133,6 +133,46 @@ bool WriteRequest(
     return true;
 }
 
+bool WriteCancellation(
+    const std::uint64_t sequence,
+    const std::string& sessionId,
+    std::string& error)
+{
+    const auto directory = Directory();
+    const auto temporary = directory / L"cancel.tmp";
+    const auto destination = directory / L"cancel.txt";
+    std::error_code filesystemError;
+    std::filesystem::create_directories(directory, filesystemError);
+    if (filesystemError)
+    {
+        error = "Could not create the bridge directory";
+        return false;
+    }
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output)
+        {
+            error = "Could not open the cancellation file";
+            return false;
+        }
+        output << "v1|" << sequence << '|' << SanitizeLine(sessionId) << '\n'
+               << EndMarker << '\n';
+        output.flush();
+        if (!output)
+        {
+            error = "Could not write the cancellation file";
+            return false;
+        }
+    }
+    if (!AtomicReplace(temporary, destination))
+    {
+        std::filesystem::remove(temporary, filesystemError);
+        error = "Could not publish the cancellation file";
+        return false;
+    }
+    return true;
+}
+
 std::optional<Response> ReadResponse()
 {
     const auto path = Directory() / L"answer.txt";
@@ -154,19 +194,26 @@ std::optional<Response> ReadResponse()
         return std::nullopt;
     }
     StripCarriageReturn(header);
-    const auto separator = header.find('|');
-    if (separator == std::string::npos)
+    std::vector<std::string> fields;
+    std::istringstream headerInput(header);
+    std::string field;
+    while (std::getline(headerInput, field, '|'))
+    {
+        fields.push_back(field);
+    }
+    if (fields.size() != 4 || fields[0] != "v1" || fields[2].empty())
     {
         return std::nullopt;
     }
     std::uint64_t sequence = 0;
     const auto parse = std::from_chars(
-        header.data(), header.data() + separator, sequence);
-    if (parse.ec != std::errc{} || parse.ptr != header.data() + separator)
+        fields[1].data(), fields[1].data() + fields[1].size(), sequence);
+    if (parse.ec != std::errc{}
+        || parse.ptr != fields[1].data() + fields[1].size())
     {
         return std::nullopt;
     }
-    const std::string status = header.substr(separator + 1);
+    const std::string& status = fields[3];
     if (status != "ok" && status != "error")
     {
         return std::nullopt;
@@ -198,6 +245,6 @@ std::optional<Response> ReadResponse()
     {
         return std::nullopt;
     }
-    return Response{sequence, status == "error", text.str()};
+    return Response{sequence, fields[2], status == "error", text.str()};
 }
 } // namespace RuptureCompanion::Bridge

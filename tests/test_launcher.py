@@ -3,6 +3,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parent.parent
 LAUNCHER = ROOT / "run-with-companion.sh"
 
@@ -13,6 +15,7 @@ def make_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Bash launcher is Linux-only")
 def test_launcher_runs_daemon_for_game_lifetime(tmp_path):
     launcher = tmp_path / LAUNCHER.name
     shutil.copy2(LAUNCHER, launcher)
@@ -21,6 +24,7 @@ def test_launcher_runs_daemon_for_game_lifetime(tmp_path):
     make_executable(
         tmp_path / ".venv/bin/python",
         "#!/usr/bin/env bash\n"
+        '[[ "$1" == *updater.py ]] && exit 0\n'
         'mkdir -p "$RC_BRIDGE_DIR"\n'
         'exec 9> "$RC_BRIDGE_DIR/daemon.lock"\n'
         "flock -n 9 || exit 0\n"

@@ -10,7 +10,6 @@ state_dir="$state_home/rupture-companion"
 data_dir="$data_home/rupture-companion"
 log_file="$state_dir/daemon.log"
 backend_dir="$companion_dir"
-release_url="https://github.com/Lucenx9/rupturecompanion/releases/latest/download/RuptureCompanion-Backend.tar.gz"
 
 if (( $# == 0 )); then
     echo "Usage: $0 <game command> [arguments...]" >&2
@@ -27,51 +26,14 @@ if ! command -v flock >/dev/null 2>&1; then
 fi
 
 mkdir -p "$state_dir" "$data_dir"
-
-update_backend() {
-    [[ "${RC_AUTO_UPDATE:-1}" == "1" ]] || return 0
-    command -v curl >/dev/null 2>&1 || return 0
-    command -v tar >/dev/null 2>&1 || return 0
-
-    local temporary archive new_etag current_etag installed
-    temporary="$(mktemp -d "$data_dir/update.XXXXXX")" || return 0
-    archive="$temporary/backend.tar.gz"
-    new_etag="$temporary/etag"
-    current_etag="$data_dir/backend.etag"
-    installed="$data_dir/backend"
-    [[ -f "$current_etag" ]] && cp -- "$current_etag" "$new_etag"
-
-    if ! curl -fsSL --retry 2 --connect-timeout 5 \
-            --etag-compare "$new_etag" --etag-save "$new_etag" \
-            -o "$archive" "$release_url"; then
-        rm -rf -- "$temporary"
-        return 0
-    fi
-    if [[ ! -s "$archive" ]]; then
-        rm -rf -- "$temporary"
-        return 0
-    fi
-    mkdir -p "$temporary/unpacked"
-    if ! tar -xzf "$archive" -C "$temporary/unpacked" \
-            || [[ ! -f "$temporary/unpacked/daemon.py" ]] \
-            || [[ ! -f "$temporary/unpacked/ai_backend.py" ]] \
-            || [[ ! -f "$temporary/unpacked/screenshot.py" ]]; then
-        rm -rf -- "$temporary"
-        return 0
-    fi
-
-    rm -rf -- "$data_dir/backend.previous"
-    if [[ -d "$installed" ]]; then
-        mv -- "$installed" "$data_dir/backend.previous"
-    fi
-    mv -- "$temporary/unpacked" "$installed"
-    mv -- "$new_etag" "$current_etag"
-    rm -rf -- "$data_dir/backend.previous" "$temporary"
-}
-
-update_backend
+"$python" "$companion_dir/updater.py" 2>>"$log_file" || true
 if [[ -f "$data_dir/backend/daemon.py" ]]; then
-    backend_dir="$data_dir/backend"
+    if command -v uv >/dev/null 2>&1 \
+            && uv sync --project "$data_dir/backend" --locked --no-dev \
+                >>"$log_file" 2>&1; then
+        backend_dir="$data_dir/backend"
+        python="$backend_dir/.venv/bin/python"
+    fi
 fi
 
 if [[ -z "${RC_BRIDGE_DIR:-}" ]]; then
@@ -122,6 +84,11 @@ stop_daemon() {
         kill -TERM -- "-$daemon_pid" 2>/dev/null || true
     fi
     wait "$daemon_pid" 2>/dev/null || true
+    failed_daemon_pid="$daemon_pid"
+    if kill -0 -- "-$failed_daemon_pid" 2>/dev/null; then
+        kill -TERM -- "-$failed_daemon_pid" 2>/dev/null || true
+    fi
+    wait "$failed_daemon_pid" 2>/dev/null || true
     daemon_pid=""
 }
 

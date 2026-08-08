@@ -1,4 +1,3 @@
-import fcntl
 import os
 import re
 import sys
@@ -7,6 +6,11 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 import ai_backend
 import screenshot
@@ -26,11 +30,22 @@ class DaemonAlreadyRunning(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class PendingAnswer:
+    sequence: int
+    session_id: str
+    question: str
+    text: str
+    is_error: bool
+    remember: bool
+
+
 @dataclass
 class Conversation:
     session_id: str | None = None
     history: list[tuple[str, str]] = field(default_factory=list)
     web_enabled: bool = True
+    pending: PendingAnswer | None = None
 
     def switch_session(self, session_id: str) -> bool:
         if self.session_id == session_id:
@@ -38,6 +53,7 @@ class Conversation:
         self.session_id = session_id
         self.history.clear()
         self.web_enabled = True
+        self.pending = None
         return True
 
     def add_turn(self, question: str, answer: str) -> None:
@@ -85,8 +101,20 @@ def acquire_lock() -> TextIO:
     directory.mkdir(parents=True, exist_ok=True)
     lock = (directory / "daemon.lock").open("a+", encoding="utf-8")
     try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as error:
+        if os.name == "nt":
+            lock.seek(0, os.SEEK_END)
+            if lock.tell() == 0:
+                lock.write("0")
+                lock.flush()
+            lock.seek(0)
+            msvcrt.locking(  # type: ignore[attr-defined]
+                lock.fileno(),
+                msvcrt.LK_NBLCK,  # type: ignore[attr-defined]
+                1,
+            )
+        else:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError) as error:
         lock.close()
         raise DaemonAlreadyRunning("another daemon is already running") from error
     lock.seek(0)
@@ -123,18 +151,30 @@ def _safe_answer(text: str) -> str:
     )
 
 
-def write_answer(sequence: int, text: str, *, error: bool = False) -> None:
+def write_answer(
+    sequence: int, session_id: str, text: str, *, error: bool = False
+) -> None:
     directory = bridge_dir()
     directory.mkdir(parents=True, exist_ok=True)
     answer = directory / "answer.txt"
     temporary = directory / "answer.tmp"
     status = "error" if error else "ok"
-    content = f"{sequence}|{status}\n{_safe_answer(text)}\n{END_MARKER}\n"
+    content = (
+        f"v1|{sequence}|{session_id}|{status}\n{_safe_answer(text)}\n{END_MARKER}\n"
+    )
     try:
         temporary.write_text(content, encoding="utf-8")
         os.replace(temporary, answer)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def cancellation_requested(sequence: int, session_id: str) -> bool:
+    try:
+        text = (bridge_dir() / "cancel.txt").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return text.splitlines() == [f"v1|{sequence}|{session_id}", END_MARKER]
 
 
 def handle(
@@ -143,24 +183,44 @@ def handle(
     game_state: str,
     conversation: Conversation,
 ) -> None:
-    requested_web_mode = ai_backend.web_mode_directive(question)
-    if requested_web_mode is not None:
-        conversation.web_enabled = requested_web_mode
-    try:
-        with screenshot.capture_for_analysis() as shot:
-            answer = ai_backend.ask(
+    session_id = conversation.session_id or ""
+    pending = conversation.pending
+    if pending is None or (pending.sequence, pending.session_id) != (
+        sequence,
+        session_id,
+    ):
+        requested_web_mode = ai_backend.web_mode_directive(question)
+        if requested_web_mode is not None:
+            conversation.web_enabled = requested_web_mode
+        try:
+            with screenshot.capture_for_analysis() as shot:
+                answer = ai_backend.ask(
+                    question,
+                    str(shot),
+                    conversation.history,
+                    game_state=game_state,
+                    web_tools_default=conversation.web_enabled,
+                    cancel_requested=lambda: cancellation_requested(
+                        sequence, session_id
+                    ),
+                )
+            pending = PendingAnswer(
+                sequence,
+                session_id,
                 question,
-                str(shot),
-                conversation.history,
-                game_state=game_state,
-                web_tools_default=conversation.web_enabled,
+                answer,
+                False,
+                not ai_backend.response_used_web(answer),
             )
-    except (screenshot.ScreenshotError, ai_backend.AIError) as error:
-        write_answer(sequence, str(error), error=True)
-        return
-    write_answer(sequence, answer)
-    if not ai_backend.response_used_web(answer):
-        conversation.add_turn(question, answer)
+        except (screenshot.ScreenshotError, ai_backend.AIError) as error:
+            pending = PendingAnswer(
+                sequence, session_id, question, str(error), True, False
+            )
+        conversation.pending = pending
+    write_answer(sequence, session_id, pending.text, error=pending.is_error)
+    if pending.remember:
+        conversation.add_turn(pending.question, pending.text)
+    conversation.pending = None
 
 
 def read_request() -> str:
@@ -187,7 +247,12 @@ def process_request(
         print(f"[{sequence}] unexpected error: {error}", file=sys.stderr)
         traceback.print_exc()
         try:
-            write_answer(sequence, "Internal daemon error. Please retry.", error=True)
+            write_answer(
+                sequence,
+                session_id,
+                "Internal daemon error. Please retry.",
+                error=True,
+            )
         except OSError:
             return False
     return True
@@ -200,17 +265,22 @@ def main() -> None:
         print(f"Rupture Companion: {error}", file=sys.stderr)
         raise SystemExit(1) from error
     conversation = Conversation()
-    seen_sequence: int | None = None
+    initial_request = parse_request(read_request())
+    seen_request = (
+        (initial_request[0], initial_request[1])
+        if initial_request is not None
+        else None
+    )
     print(f"Rupture Companion daemon watching {bridge_dir()}")
     try:
         while True:
             request = parse_request(read_request())
             if (
                 request is not None
-                and request[0] != seen_sequence
+                and (request[0], request[1]) != seen_request
                 and process_request(request, conversation)
             ):
-                seen_sequence = request[0]
+                seen_request = (request[0], request[1])
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:
         pass

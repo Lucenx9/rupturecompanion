@@ -3,6 +3,7 @@ import re
 import subprocess
 import time
 import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -100,6 +101,10 @@ RESPONSE_SCHEMA: dict[str, object] = {
 
 
 class AIError(Exception):
+    pass
+
+
+class RequestCanceled(AIError):
     pass
 
 
@@ -301,6 +306,51 @@ def _claude_command(tools: str) -> list[str]:
     ]
 
 
+def _run_with_cancellation(
+    command: list[str],
+    prompt: str,
+    *,
+    cwd: Path,
+    timeout: float,
+    cancel_requested: Callable[[], bool],
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=cwd,
+    )
+    deadline = time.monotonic() + timeout
+    pending_input: str | None = prompt
+    while True:
+        if cancel_requested():
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise RequestCanceled("Request canceled")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            process.kill()
+            process.wait()
+            raise subprocess.TimeoutExpired(command, timeout)
+        try:
+            stdout, stderr = process.communicate(
+                input=pending_input, timeout=min(0.25, remaining)
+            )
+            return subprocess.CompletedProcess(
+                command, process.returncode, stdout=stdout, stderr=stderr
+            )
+        except subprocess.TimeoutExpired:
+            pending_input = None
+
+
 def ask(
     question: str,
     screenshot_path: str,
@@ -309,6 +359,7 @@ def ask(
     game_state: str = "",
     web_tools_default: bool = True,
     timeout: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> str:
     started_at = time.monotonic()
     screenshot = Path(screenshot_path).expanduser().resolve()
@@ -334,15 +385,25 @@ def ask(
         json.dumps(RESPONSE_SCHEMA, separators=(",", ":")),
     ]
     try:
-        result = subprocess.run(
-            command,
-            input=build_prompt(question, str(screenshot), history, game_state),
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=effective_timeout,
-            cwd=screenshot.parent,
-        )
+        prompt = build_prompt(question, str(screenshot), history, game_state)
+        if cancel_requested is None:
+            result = subprocess.run(
+                command,
+                input=prompt,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=effective_timeout,
+                cwd=screenshot.parent,
+            )
+        else:
+            result = _run_with_cancellation(
+                command,
+                prompt,
+                cwd=screenshot.parent,
+                timeout=effective_timeout,
+                cancel_requested=cancel_requested,
+            )
     except subprocess.TimeoutExpired as error:
         raise AIError(f"no response within {effective_timeout:.0f} seconds") from error
     except FileNotFoundError as error:
@@ -368,4 +429,5 @@ def ask(
             game_state=game_state,
             web_tools_default=False,
             timeout=remaining,
+            cancel_requested=cancel_requested,
         )
