@@ -148,7 +148,7 @@ jobs:
         run: |
           tag="$(gh release view --json tagName --jq .tagName)"
           staging="$(mktemp -d)"
-          cp ai_backend.py daemon.py screenshot.py updater.py pyproject.toml uv.lock "$staging/"
+          cp ai_backend.py daemon.py plugin_updater.py screenshot.py updater.py pyproject.toml uv.lock "$staging/"
           printf '%s\n' "$tag" > "$staging/VERSION"
           tar -C "$staging" -czf RuptureCompanion-Backend.tar.gz .
           gh release upload "$tag" RuptureCompanion-Backend.tar.gz --clobber

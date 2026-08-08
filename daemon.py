@@ -13,6 +13,7 @@ else:
     import fcntl
 
 import ai_backend
+import plugin_updater
 import screenshot
 
 REQUEST_PREFIX = "v1|"
@@ -279,6 +280,13 @@ def process_request(
 
 
 def main() -> None:
+    bridge = bridge_dir()
+    try:
+        migrated = plugin_updater.sync_plugin(bridge)
+        if migrated:
+            print(f"Rupture Companion plugin migrated to {migrated}")
+    except (OSError, plugin_updater.PluginUpdateError) as error:
+        print(f"Rupture Companion plugin migration skipped: {error}", file=sys.stderr)
     try:
         lock = acquire_lock()
     except DaemonAlreadyRunning as error:

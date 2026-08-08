@@ -75,7 +75,7 @@ if ($env:RC_PLUGIN_INTERFACE) {
     if ($LatestLog) {
         $Matches = [regex]::Matches(
             [System.IO.File]::ReadAllText($LatestLog.FullName),
-            'modloader expects \[(\d+),\s*(\d+)\]',
+            '(?:modloader expects|loader supports|supported range) \[(\d+),\s*(\d+)\]',
             [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
         )
         if ($Matches.Count -gt 0) {

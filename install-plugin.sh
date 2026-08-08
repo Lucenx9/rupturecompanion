@@ -33,7 +33,7 @@ else
     latest_log="$(find "$log_dir" -maxdepth 1 -type f -name 'ModLoader*.log' \
         -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)"
     if [[ -n "$latest_log" ]]; then
-        interface_range="$(sed -n 's/.*modloader expects \[\([0-9][0-9]*\), \([0-9][0-9]*\)\].*/\1 \2/p' \
+        interface_range="$(sed -nE 's/.*(modloader expects|loader supports|supported range) \[([0-9]+),[[:space:]]*([0-9]+)\].*/\2 \3/p' \
             "$latest_log" | tail -1)"
         read -r interface_min interface_max <<<"$interface_range" || true
     fi

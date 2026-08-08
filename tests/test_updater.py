@@ -25,6 +25,7 @@ def test_extract_backend_accepts_complete_release(tmp_path):
         {
             "daemon.py": "daemon",
             "ai_backend.py": "backend",
+            "plugin_updater.py": "plugin_updater = True",
             "screenshot.py": "screenshot",
             "updater.py": "updater",
             "VERSION": "v0.1.0\n",
@@ -53,6 +54,7 @@ def test_extract_backend_rejects_invalid_python(tmp_path):
         {
             "daemon.py": "not valid Python !",
             "ai_backend.py": "backend = True",
+            "plugin_updater.py": "plugin_updater = True",
             "screenshot.py": "screenshot = True",
             "updater.py": "updater = True",
             "VERSION": "v0.1.0\n",
@@ -153,6 +155,7 @@ def test_update_backend_installs_release_and_keeps_rollback(tmp_path, monkeypatc
             {
                 "daemon.py": "daemon = True",
                 "ai_backend.py": "backend = True",
+                "plugin_updater.py": "plugin_updater = True",
                 "screenshot.py": "screenshot = True",
                 "updater.py": "updater = True",
                 "VERSION": "v0.2.0\n",
