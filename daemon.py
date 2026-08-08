@@ -113,7 +113,10 @@ def acquire_lock() -> TextIO:
                 1,
             )
         else:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(  # type: ignore[attr-defined]
+                lock.fileno(),
+                fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
+            )
     except (BlockingIOError, OSError) as error:
         lock.close()
         raise DaemonAlreadyRunning("another daemon is already running") from error
