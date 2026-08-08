@@ -1,0 +1,19 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{BC8A1FFA-BEE3-4634-8014-F334798102B3}") = "RuptureCompanion", "RuptureCompanion.vcxproj", "{1D47FE6A-A9A4-4CC1-9174-C3444DD152A9}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Client Debug|x64 = Client Debug|x64
+		Client Release|x64 = Client Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1D47FE6A-A9A4-4CC1-9174-C3444DD152A9}.Client Debug|x64.ActiveCfg = Client Debug|x64
+		{1D47FE6A-A9A4-4CC1-9174-C3444DD152A9}.Client Debug|x64.Build.0 = Client Debug|x64
+		{1D47FE6A-A9A4-4CC1-9174-C3444DD152A9}.Client Release|x64.ActiveCfg = Client Release|x64
+		{1D47FE6A-A9A4-4CC1-9174-C3444DD152A9}.Client Release|x64.Build.0 = Client Release|x64
+	EndGlobalSection
+EndGlobal
+

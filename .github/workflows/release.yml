@@ -1,0 +1,86 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
+
+jobs:
+  release:
+    uses: AlienXAXS/StarRupture-Plugin-SDK/.github/workflows/plugin-release.yml@main
+    with:
+      plugin_name: RuptureCompanion
+      solution_file: RuptureCompanion.sln
+      variant: Client
+      release_title: Rupture Companion
+    secrets: inherit
+
+  legacy:
+    needs: release
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Download legacy v47 interface
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force legacy-sdk\include | Out-Null
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/AlienXAXS/StarRupture-ModLoader/v1.15.6/StarRupture-ModLoader-Core/plugins/plugin_interface.h" `
+            -OutFile legacy-sdk\include\plugin_interface.h
+      - name: Build and package legacy plugin
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = gh release view --json tagName --jq .tagName
+          msbuild RuptureCompanion.sln `
+            /p:Configuration="Client Release" `
+            /p:Platform=x64 `
+            /p:PluginSDKInclude="${{ github.workspace }}\legacy-sdk\include" `
+            /p:ModLoaderBuildTag="$tag" `
+            /m /v:minimal
+
+          $dll = "build\Client Release\Plugins\RuptureCompanion.dll"
+          Copy-Item $dll RuptureCompanion-Legacy.dll
+          [ordered]@{
+            plugin_name = "RuptureCompanion"
+            version = $tag
+            interface_version_min = 46
+            interface_version_max = 47
+            download_url = "https://github.com/${{ github.repository }}/releases/download/$tag/RuptureCompanion-Legacy.dll"
+          } | ConvertTo-Json | Out-File RuptureCompanion-legacy-manifest.json -Encoding utf8NoBOM
+
+          New-Item -ItemType Directory -Force staging\Plugins | Out-Null
+          Copy-Item $dll staging\Plugins\RuptureCompanion.dll
+          [ordered]@{
+            manifest_url = "https://github.com/${{ github.repository }}/releases/latest/download/RuptureCompanion-legacy-manifest.json"
+          } | ConvertTo-Json | Out-File staging\Plugins\RuptureCompanion.json -Encoding utf8NoBOM
+          Compress-Archive -Path staging\* -DestinationPath "RuptureCompanion-Legacy-$tag.zip"
+          gh release upload $tag `
+            RuptureCompanion-Legacy.dll `
+            RuptureCompanion-legacy-manifest.json `
+            "RuptureCompanion-Legacy-$tag.zip" --clobber
+
+  backend:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package and upload backend
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(gh release view --json tagName --jq .tagName)"
+          staging="$(mktemp -d)"
+          cp ai_backend.py daemon.py screenshot.py pyproject.toml uv.lock "$staging/"
+          printf '%s\n' "$tag" > "$staging/VERSION"
+          tar -C "$staging" -czf RuptureCompanion-Backend.tar.gz .
+          gh release upload "$tag" RuptureCompanion-Backend.tar.gz --clobber
+

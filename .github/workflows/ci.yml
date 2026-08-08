@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --group dev
+      - run: uv run pytest -q
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: shellcheck run-with-companion.sh install-plugin.sh
+
+  plugin:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: AlienXAXS/StarRupture-Plugin-SDK
+          path: plugin-sdk
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build current interface
+        shell: pwsh
+        run: |
+          msbuild RuptureCompanion.sln `
+            /p:Configuration="Client Release" `
+            /p:Platform=x64 `
+            /p:PluginSDKInclude="${{ github.workspace }}\plugin-sdk\include" `
+            /m /v:minimal
+      - name: Download legacy v47 interface
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force legacy-sdk\include | Out-Null
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/AlienXAXS/StarRupture-ModLoader/v1.15.6/StarRupture-ModLoader-Core/plugins/plugin_interface.h" `
+            -OutFile legacy-sdk\include\plugin_interface.h
+      - name: Build legacy interface
+        shell: pwsh
+        run: |
+          msbuild RuptureCompanion.sln /t:Rebuild `
+            /p:Configuration="Client Release" `
+            /p:Platform=x64 `
+            /p:PluginSDKInclude="${{ github.workspace }}\legacy-sdk\include" `
+            /m /v:minimal
+
