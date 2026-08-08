@@ -82,7 +82,13 @@ if [[ "$(od -An -N2 -tc "$temporary/RuptureCompanion.dll" | tr -d ' ')" != "MZ" 
 fi
 
 if [[ -f "$rollback_dll" ]]; then
-    mv -f -- "$rollback_dll" "$installed_dll"
+    if [[ -f "$installed_sidecar" ]] \
+            && grep -Fq -- "\"manifest_url\": \"$manifest_url\"" \
+                "$installed_sidecar"; then
+        rm -f -- "$rollback_dll"
+    else
+        cp -p -- "$rollback_dll" "$installed_dll"
+    fi
 fi
 install -m 0644 "$temporary/RuptureCompanion.dll" "$staged_dll"
 printf '{\n  "manifest_url": "%s"\n}\n' "$manifest_url" \

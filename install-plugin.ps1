@@ -127,8 +127,21 @@ try {
     $RollbackPrepare = Join-Path $PluginDir `
         (".RuptureCompanion.dll.rollback." + [guid]::NewGuid())
 
+    $InstalledManifestUrl = $null
+    if (Test-Path -LiteralPath $InstalledSidecar) {
+        try {
+            $InstalledManifestUrl = (
+                [System.IO.File]::ReadAllText($InstalledSidecar) | ConvertFrom-Json
+            ).manifest_url
+        } catch {
+        }
+    }
     if (Test-Path -LiteralPath $RollbackDll) {
-        Move-Item -LiteralPath $RollbackDll -Destination $InstalledDll -Force
+        if ($InstalledManifestUrl -eq $ManifestUrl) {
+            Remove-Item -LiteralPath $RollbackDll -Force
+        } else {
+            Copy-Item -LiteralPath $RollbackDll -Destination $InstalledDll -Force
+        }
     }
     Copy-Item -LiteralPath $DownloadedDll -Destination $StagedDll
     $Sidecar = @{ manifest_url = $ManifestUrl } | ConvertTo-Json

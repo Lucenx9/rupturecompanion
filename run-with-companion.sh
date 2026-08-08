@@ -40,6 +40,10 @@ if [[ -f "$data_dir/backend/daemon.py" ]]; then
             2>>"$log_file" || true
     fi
 fi
+daemon_ready_protocol=0
+if grep -Fq 'READY_PROTOCOL_VERSION = 1' "$backend_dir/daemon.py"; then
+    daemon_ready_protocol=1
+fi
 
 if [[ -z "${RC_BRIDGE_DIR:-}" ]]; then
     if [[ -n "${STEAM_COMPAT_INSTALL_PATH:-}" ]]; then
@@ -51,6 +55,7 @@ fi
 export RC_BRIDGE_DIR
 mkdir -p "$RC_BRIDGE_DIR"
 lock_file="$RC_BRIDGE_DIR/daemon.lock"
+ready_file="$RC_BRIDGE_DIR/daemon.ready"
 daemon_pid=""
 game_pid=""
 
@@ -59,6 +64,7 @@ start_daemon() {
         cd "$backend_dir" || exit 1
         exec setsid env -u LD_LIBRARY_PATH -u LD_PRELOAD -u QT_QPA_PLATFORM \
             PYTHONUNBUFFERED=1 RC_BRIDGE_DIR="$RC_BRIDGE_DIR" \
+            RC_DAEMON_READY_PROTOCOL="$daemon_ready_protocol" \
             "$python" "$backend_dir/daemon.py"
     ) >>"$log_file" 2>&1 &
     daemon_pid=$!
@@ -66,16 +72,29 @@ start_daemon() {
 
 wait_for_daemon() {
     local lock_pid=""
-    for _ in {1..200}; do
+    local ready_pid=""
+    local startup_attempts=0
+    local daemon_live=0
+    while kill -0 "$daemon_pid" 2>/dev/null; do
+        lock_pid=""
         if [[ -f "$lock_file" ]]; then
             read -r lock_pid < "$lock_file" || true
         fi
         if [[ "$lock_pid" == "$daemon_pid" ]] \
                 && kill -0 "$daemon_pid" 2>/dev/null \
                 && ! flock -n "$lock_file" -c true 2>/dev/null; then
-            return 0
+            daemon_live=1
+            (( daemon_ready_protocol )) || return 0
+            ready_pid=""
+            if [[ -f "$ready_file" ]]; then
+                read -r ready_pid < "$ready_file" || true
+            fi
+            [[ "$ready_pid" == "$daemon_pid" ]] && return 0
         fi
-        kill -0 "$daemon_pid" 2>/dev/null || return 1
+        if (( ! daemon_live )); then
+            (( startup_attempts += 1 ))
+            (( startup_attempts < 200 )) || return 1
+        fi
         sleep 0.05
     done
     return 1

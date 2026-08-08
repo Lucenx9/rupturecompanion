@@ -44,6 +44,47 @@ def make_modloader_install(tmp_path: Path, log_line: str) -> Path:
     return bridge
 
 
+INSTALLER_RECOVERY_CASES = (
+    (
+        plugin_updater.CURRENT_MANIFEST_URL,
+        b"MZcurrent",
+        b"MZcurrent",
+        False,
+    ),
+    (
+        plugin_updater.LEGACY_MANIFEST_URL,
+        b"MZinterrupted",
+        b"MZlegacy",
+        True,
+    ),
+)
+
+
+def make_installer_recovery_state(
+    tmp_path: Path, installed_manifest: str, installed_dll: bytes
+) -> tuple[Path, Path, Path]:
+    game_root = tmp_path / "StarRupture"
+    binary_dir = game_root / "StarRupture/Binaries/Win64"
+    plugin_dir = binary_dir / "ModLoader/Plugins"
+    log_dir = binary_dir / "ModLoader/Logs"
+    plugin_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    (binary_dir / "StarRuptureGameSteam-Win64-Shipping.exe").write_bytes(b"")
+    (binary_dir / "dwmapi.dll").write_bytes(b"MZ")
+    (log_dir / "ModLoader.log").write_text(
+        "loader supports [60, 60]\n", encoding="utf-8"
+    )
+    dll = plugin_dir / "RuptureCompanion.dll"
+    sidecar = plugin_dir / "RuptureCompanion.json"
+    rollback = plugin_dir / "RuptureCompanion.dll.rollback"
+    dll.write_bytes(installed_dll)
+    sidecar.write_text(
+        json.dumps({"manifest_url": installed_manifest}), encoding="utf-8"
+    )
+    rollback.write_bytes(b"MZlegacy")
+    return game_root, dll, rollback
+
+
 def test_sync_plugin_migrates_legacy_install_to_current_variant(tmp_path, monkeypatch):
     bridge = make_modloader_install(tmp_path, "loader supports [60, 60] -- skipping\n")
     plugin_dir = bridge.parent / "ModLoader/Plugins"
@@ -222,25 +263,74 @@ def test_sync_plugin_serializes_concurrent_migrations(tmp_path, monkeypatch):
     assert sorted(result for result in results if result is not None) == ["Current v60"]
 
 
-def test_daemon_syncs_plugin_before_acquiring_lock(tmp_path, monkeypatch):
+def test_daemon_signals_readiness_after_plugin_sync(tmp_path, monkeypatch):
     events = []
-    monkeypatch.setattr(daemon, "bridge_dir", lambda: tmp_path / "bridge")
+    bridge = tmp_path / "bridge"
+    bridge.mkdir()
+    monkeypatch.setenv("RC_DAEMON_READY_PROTOCOL", "1")
+    monkeypatch.setattr(daemon, "bridge_dir", lambda: bridge)
+
+    class FakeLock:
+        def close(self):
+            events.append(("close", None))
+
+    def acquire_lock():
+        events.append(("lock", None))
+        return FakeLock()
+
+    monkeypatch.setattr(daemon, "acquire_lock", acquire_lock)
     monkeypatch.setattr(
         daemon.plugin_updater,
         "sync_plugin",
         lambda bridge: events.append(("sync", bridge)),
     )
 
-    def stop_after_sync():
-        events.append(("lock", None))
-        raise daemon.DaemonAlreadyRunning("test stop")
+    def stop_after_ready(_seconds):
+        events.append(("ready", (bridge / "daemon.ready").read_text().strip()))
+        raise KeyboardInterrupt
 
-    monkeypatch.setattr(daemon, "acquire_lock", stop_after_sync)
+    monkeypatch.setattr(daemon.time, "sleep", stop_after_ready)
 
-    with pytest.raises(SystemExit):
-        daemon.main()
+    daemon.main()
 
-    assert events == [("sync", tmp_path / "bridge"), ("lock", None)]
+    assert events == [
+        ("lock", None),
+        ("sync", bridge),
+        ("ready", str(os.getpid())),
+        ("close", None),
+    ]
+    assert not (bridge / "daemon.ready").exists()
+
+
+def test_daemon_keeps_lock_as_readiness_for_legacy_launcher(tmp_path, monkeypatch):
+    events = []
+    bridge = tmp_path / "bridge"
+    bridge.mkdir()
+    monkeypatch.delenv("RC_DAEMON_READY_PROTOCOL", raising=False)
+    monkeypatch.setattr(daemon, "bridge_dir", lambda: bridge)
+
+    class FakeLock:
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(
+        daemon.plugin_updater, "sync_plugin", lambda _bridge: events.append("sync")
+    )
+    monkeypatch.setattr(
+        daemon,
+        "acquire_lock",
+        lambda: events.append("lock") or FakeLock(),
+    )
+    monkeypatch.setattr(
+        daemon.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    daemon.main()
+
+    assert events == ["sync", "lock", "close"]
+    assert not (bridge / "daemon.ready").exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Bash installer is Linux-only")
@@ -294,6 +384,55 @@ def test_bash_installer_detects_new_loader_log_format(tmp_path):
     assert plugin_updater.CURRENT_MANIFEST_URL in (
         plugin_dir / "RuptureCompanion.json"
     ).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("installed_manifest", "installed_dll", "expected_dll", "keeps_rollback"),
+    INSTALLER_RECOVERY_CASES,
+)
+@pytest.mark.skipif(os.name == "nt", reason="Bash installer is Linux-only")
+def test_bash_installer_keeps_recovery_state_when_staging_fails(
+    tmp_path,
+    installed_manifest,
+    installed_dll,
+    expected_dll,
+    keeps_rollback,
+):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    game_root, dll, rollback = make_installer_recovery_state(
+        tmp_path, installed_manifest, installed_dll
+    )
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        "#!/usr/bin/env bash\n"
+        "while (( $# )); do\n"
+        "  if [[ $1 == -o ]]; then output=$2; shift 2; continue; fi\n"
+        "  shift\n"
+        "done\n"
+        'printf MZdownloaded > "$output"\n',
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    failing_install = fake_bin / "install"
+    failing_install.write_text("#!/usr/bin/env bash\nexit 43\n", encoding="utf-8")
+    failing_install.chmod(0o755)
+
+    result = subprocess.run(
+        [str(Path(__file__).parent.parent / "install-plugin.sh"), str(game_root)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "RC_ENABLE_AUTO_UPDATE": "0",
+        },
+    )
+
+    assert result.returncode == 43
+    assert dll.read_bytes() == expected_dll
+    assert rollback.exists() is keeps_rollback
 
 
 def test_windows_installer_recognizes_new_loader_log_messages():
@@ -355,3 +494,49 @@ def test_powershell_installer_prefers_current_for_overlapping_range(tmp_path):
     assert plugin_updater.CURRENT_MANIFEST_URL in (
         plugin_dir / "RuptureCompanion.json"
     ).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("installed_manifest", "installed_dll", "expected_dll", "keeps_rollback"),
+    INSTALLER_RECOVERY_CASES,
+)
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell installer is Windows-only")
+def test_powershell_installer_keeps_recovery_state_when_staging_fails(
+    tmp_path,
+    installed_manifest,
+    installed_dll,
+    expected_dll,
+    keeps_rollback,
+):
+    game_root, dll, rollback = make_installer_recovery_state(
+        tmp_path, installed_manifest, installed_dll
+    )
+    installer = Path(__file__).parent.parent / "install-plugin.ps1"
+
+    def quote(path: Path) -> str:
+        return str(path).replace("'", "''")
+
+    command = (
+        "function Invoke-WebRequest { param([switch]$UseBasicParsing, "
+        "[string]$Uri, [string]$OutFile); "
+        "[IO.File]::WriteAllBytes($OutFile, [byte[]](0x4d,0x5a,0x00)) }; "
+        "function Copy-Item { [CmdletBinding()] param("
+        "[Parameter(Mandatory=$true)][string]$LiteralPath, "
+        "[Parameter(Mandatory=$true)][string]$Destination, [switch]$Force); "
+        "if ([IO.Path]::GetFileName($Destination) -like "
+        "'.RuptureCompanion.dll.update.*') { throw 'staging failed' }; "
+        "Microsoft.PowerShell.Management\\Copy-Item @PSBoundParameters }; "
+        f"& '{quote(installer)}' -GameRoot '{quote(game_root)}'"
+    )
+
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ | {"RC_ENABLE_AUTO_UPDATE": "0"},
+    )
+
+    assert result.returncode != 0
+    assert dll.read_bytes() == expected_dll
+    assert rollback.exists() is keeps_rollback

@@ -20,6 +20,7 @@ REQUEST_PREFIX = "v1|"
 END_MARKER = "__RC_END__"
 MAX_HISTORY_TURNS = ai_backend.HISTORY_TURNS
 POLL_SECONDS = 0.25
+READY_PROTOCOL_VERSION = 1
 STEAM_APP_ID = "1631270"
 STEAM_ROOTS = (
     Path.home() / ".local/share/Steam",
@@ -121,10 +122,15 @@ def acquire_lock() -> TextIO:
     except (BlockingIOError, OSError) as error:
         lock.close()
         raise DaemonAlreadyRunning("another daemon is already running") from error
-    lock.seek(0)
-    lock.truncate()
-    lock.write(f"{os.getpid()}\n")
-    lock.flush()
+    try:
+        (directory / "daemon.ready").unlink(missing_ok=True)
+        lock.seek(0)
+        lock.truncate()
+        lock.write(f"{os.getpid()}\n")
+        lock.flush()
+    except OSError:
+        lock.close()
+        raise
     return lock
 
 
@@ -281,29 +287,38 @@ def process_request(
 
 def main() -> None:
     bridge = bridge_dir()
-    try:
-        migrated = plugin_updater.sync_plugin(bridge)
-        if migrated:
-            print(f"Rupture Companion plugin migrated to {migrated}")
-    except (OSError, plugin_updater.PluginUpdateError) as error:
-        print(f"Rupture Companion plugin migration skipped: {error}", file=sys.stderr)
-    try:
-        lock = acquire_lock()
-    except DaemonAlreadyRunning as error:
-        print(f"Rupture Companion: {error}", file=sys.stderr)
-        raise SystemExit(1) from error
-    conversation = Conversation()
-    initial_request = parse_request(read_request())
-    initial_identity = (
-        (initial_request[0], initial_request[1])
-        if initial_request is not None
-        else None
+    ready = bridge / "daemon.ready"
+    ready_protocol = os.environ.get("RC_DAEMON_READY_PROTOCOL") == str(
+        READY_PROTOCOL_VERSION
     )
-    seen_request = (
-        initial_identity if initial_identity == read_answer_identity() else None
-    )
-    print(f"Rupture Companion daemon watching {bridge_dir()}")
+    lock: TextIO | None = None
     try:
+        if ready_protocol:
+            lock = acquire_lock()
+        try:
+            migrated = plugin_updater.sync_plugin(bridge)
+            if migrated:
+                print(f"Rupture Companion plugin migrated to {migrated}")
+        except (OSError, plugin_updater.PluginUpdateError) as error:
+            print(
+                f"Rupture Companion plugin migration skipped: {error}",
+                file=sys.stderr,
+            )
+        if lock is None:
+            lock = acquire_lock()
+        if ready_protocol:
+            ready.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        conversation = Conversation()
+        initial_request = parse_request(read_request())
+        initial_identity = (
+            (initial_request[0], initial_request[1])
+            if initial_request is not None
+            else None
+        )
+        seen_request = (
+            initial_identity if initial_identity == read_answer_identity() else None
+        )
+        print(f"Rupture Companion daemon watching {bridge_dir()}")
         while True:
             request = parse_request(read_request())
             if (
@@ -313,10 +328,18 @@ def main() -> None:
             ):
                 seen_request = (request[0], request[1])
             time.sleep(POLL_SECONDS)
+    except DaemonAlreadyRunning as error:
+        print(f"Rupture Companion: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
     except KeyboardInterrupt:
         pass
     finally:
-        lock.close()
+        if lock is not None:
+            try:
+                if ready_protocol:
+                    ready.unlink(missing_ok=True)
+            finally:
+                lock.close()
 
 
 if __name__ == "__main__":

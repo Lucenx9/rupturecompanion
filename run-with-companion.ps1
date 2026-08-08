@@ -35,6 +35,12 @@ if (Test-Path -LiteralPath (Join-Path $BackendDir "daemon.py")) {
 } else {
     $BackendDir = $PSScriptRoot
 }
+$DaemonReadyProtocol = 0
+if (Select-String -LiteralPath (Join-Path $BackendDir "daemon.py") `
+    -SimpleMatch "READY_PROTOCOL_VERSION = 1" -Quiet) {
+    $DaemonReadyProtocol = 1
+}
+$env:RC_DAEMON_READY_PROTOCOL = [string]$DaemonReadyProtocol
 
 if ($env:RC_BRIDGE_DIR) {
     $BridgeDir = $env:RC_BRIDGE_DIR
@@ -65,16 +71,29 @@ function Start-CompanionDaemon {
 function Wait-CompanionDaemon {
     param([System.Diagnostics.Process]$Process)
     $lockFile = Join-Path $BridgeDir "daemon.lock"
-    for ($attempt = 0; $attempt -lt 200; $attempt++) {
+    $readyFile = Join-Path $BridgeDir "daemon.ready"
+    $startupAttempts = 0
+    $daemonLive = $false
+    while ($true) {
         $Process.Refresh()
         if ($Process.HasExited) { return $false }
         if (Test-Path -LiteralPath $lockFile) {
             $lockPid = ([System.IO.File]::ReadAllText($lockFile)).Trim()
-            if ($lockPid -eq [string]$Process.Id) { return $true }
+            if ($lockPid -eq [string]$Process.Id) {
+                $daemonLive = $true
+                if ($DaemonReadyProtocol -ne 1) { return $true }
+                if (Test-Path -LiteralPath $readyFile) {
+                    $readyPid = ([System.IO.File]::ReadAllText($readyFile)).Trim()
+                    if ($readyPid -eq [string]$Process.Id) { return $true }
+                }
+            }
+        }
+        if (-not $daemonLive) {
+            $startupAttempts++
+            if ($startupAttempts -ge 200) { return $false }
         }
         Start-Sleep -Milliseconds 50
     }
-    return $false
 }
 
 function ConvertTo-NativeArgument {
