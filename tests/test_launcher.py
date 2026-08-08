@@ -107,6 +107,9 @@ def test_powershell_launcher_waits_for_migration(tmp_path, supports_ready_protoc
         "identity = f'{os.getpid()}|{nonce}' if nonce else str(os.getpid())\n"
         "if nonce:\n"
         "    (bridge / 'daemon.lock').write_text(identity)\n"
+        "else:\n"
+        "    (bridge / 'daemon.lock').write_text(identity)\n"
+        "    os.utime(bridge / 'daemon.lock', (1, 1))\n"
         "time.sleep(10.25)\n"
         "Path(os.environ['MIGRATION_FILE']).write_text('migrated')\n"
         "if not nonce:\n"
@@ -152,3 +155,73 @@ def test_powershell_launcher_waits_for_migration(tmp_path, supports_ready_protoc
     assert (
         "|" in (tmp_path / "bridge/daemon.lock").read_text(encoding="utf-8")
     ) is supports_ready_protocol
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell launcher is Windows-only")
+def test_powershell_launcher_refreshes_nonce_when_daemon_restarts(tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    backend = local_app_data / "RuptureCompanion/backend"
+    backend.mkdir(parents=True)
+    shutil.copy2(ROOT / "pyproject.toml", backend)
+    shutil.copy2(ROOT / "uv.lock", backend)
+    shutil.copy2(ROOT / "daemon-capabilities.json", backend)
+    (backend / "daemon.py").write_text(
+        "import os\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "attempts = Path(os.environ['ATTEMPTS_FILE'])\n"
+        "attempt = int(attempts.read_text()) + 1 if attempts.exists() else 1\n"
+        "attempts.write_text(str(attempt))\n"
+        "nonce = os.environ['RC_DAEMON_READY_NONCE']\n"
+        "with Path(os.environ['NONCES_FILE']).open('a') as output:\n"
+        "    output.write(nonce + '\\n')\n"
+        "bridge = Path(os.environ['RC_BRIDGE_DIR'])\n"
+        "bridge.mkdir(parents=True, exist_ok=True)\n"
+        "identity = f'{os.getpid()}|{nonce}'\n"
+        "(bridge / 'daemon.lock').write_text(identity)\n"
+        "(bridge / 'daemon.ready').write_text(identity)\n"
+        "if attempt == 1:\n"
+        "    time.sleep(0.25)\n"
+        "    raise SystemExit(0)\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n",
+        encoding="utf-8",
+    )
+    game = tmp_path / "game.cmd"
+    game.write_text(
+        "@echo off\r\nping 127.0.0.1 -n 3 > nul\r\nexit /b 7\r\n",
+        encoding="utf-8",
+    )
+    nonces = tmp_path / "nonces.txt"
+    env = os.environ | {
+        "ATTEMPTS_FILE": str(tmp_path / "attempts.txt"),
+        "LOCALAPPDATA": str(local_app_data),
+        "NONCES_FILE": str(nonces),
+        "RC_AUTO_UPDATE": "0",
+        "RC_BRIDGE_DIR": str(tmp_path / "bridge"),
+    }
+
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "run-with-companion.ps1"),
+            "cmd.exe",
+            "/d",
+            "/c",
+            str(game),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 7, result.stderr
+    launched_nonces = nonces.read_text(encoding="utf-8").splitlines()
+    assert len(launched_nonces) >= 2
+    assert launched_nonces[0] != launched_nonces[1]

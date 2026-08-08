@@ -45,13 +45,7 @@ try {
     }
 } catch {
 }
-$DaemonReadyNonce = if ($DaemonReadyProtocol -eq 1) {
-    [guid]::NewGuid().ToString("N")
-} else {
-    ""
-}
-$env:RC_DAEMON_READY_PROTOCOL = [string]$DaemonReadyProtocol
-$env:RC_DAEMON_READY_NONCE = $DaemonReadyNonce
+$DaemonReadyNonce = ""
 
 if ($env:RC_BRIDGE_DIR) {
     $BridgeDir = $env:RC_BRIDGE_DIR
@@ -71,6 +65,13 @@ function Stop-ProcessTree {
 }
 
 function Start-CompanionDaemon {
+    $script:DaemonReadyNonce = if ($DaemonReadyProtocol -eq 1) {
+        [guid]::NewGuid().ToString("N")
+    } else {
+        ""
+    }
+    $env:RC_DAEMON_READY_PROTOCOL = [string]$DaemonReadyProtocol
+    $env:RC_DAEMON_READY_NONCE = $DaemonReadyNonce
     $daemonScript = Join-Path $BackendDir "daemon.py"
     $daemonArgument = '"' + $daemonScript.Replace('"', '\"') + '"'
     return Start-Process -FilePath $Python -ArgumentList $daemonArgument `
@@ -103,9 +104,17 @@ function Wait-CompanionDaemon {
         if ($Process.HasExited) { return $false }
         $lockIdentity = Read-CompanionState $lockFile
         if ($lockIdentity -eq $expectedIdentity) {
-            if ($DaemonReadyProtocol -ne 1) { return $true }
-            $readyIdentity = Read-CompanionState $readyFile
-            if ($readyIdentity -eq $expectedIdentity) { return $true }
+            if ($DaemonReadyProtocol -ne 1) {
+                try {
+                    $lockWrittenUtc = (Get-Item -LiteralPath $lockFile).LastWriteTimeUtc
+                    $processStartedUtc = $Process.StartTime.ToUniversalTime()
+                    if ($lockWrittenUtc -ge $processStartedUtc) { return $true }
+                } catch {
+                }
+            } else {
+                $readyIdentity = Read-CompanionState $readyFile
+                if ($readyIdentity -eq $expectedIdentity) { return $true }
+            }
         }
         Start-Sleep -Milliseconds 50
     }

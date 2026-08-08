@@ -52,7 +52,6 @@ with open(sys.argv[1], encoding="utf-8") as capabilities:
 ' "$capabilities_file" 2>/dev/null || true)"
 if [[ "$ready_protocol" == 1 ]]; then
     daemon_ready_protocol=1
-    daemon_ready_nonce="$$-$RANDOM-$RANDOM-$(date +%s%N)"
 fi
 
 if [[ -z "${RC_BRIDGE_DIR:-}" ]]; then
@@ -70,6 +69,11 @@ daemon_pid=""
 game_pid=""
 
 start_daemon() {
+    if (( daemon_ready_protocol )); then
+        daemon_ready_nonce="$$-$RANDOM-$RANDOM-$(date +%s%N)"
+    else
+        daemon_ready_nonce=""
+    fi
     (
         cd "$backend_dir" || exit 1
         exec setsid env -u LD_LIBRARY_PATH -u LD_PRELOAD -u QT_QPA_PLATFORM \
