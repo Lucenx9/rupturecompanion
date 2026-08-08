@@ -50,7 +50,9 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <RuntimeLibrary Condition="'$(Configuration)'=='Client Debug'">MultiThreadedDebug</RuntimeLibrary>
       <RuntimeLibrary Condition="'$(Configuration)'=='Client Release'">MultiThreaded</RuntimeLibrary>
-      <AdditionalIncludeDirectories>$(PluginSDKInclude);$(ProjectDir)include;$(ProjectDir)plugin;$(GameSDKClientDir);$(GameSDKSourceDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(PluginSDKInclude);$(ProjectDir)include;$(ProjectDir)plugin;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ExternalIncludePath>$(GameSDKClientDir);$(GameSDKSourceDir);$(ExternalIncludePath)</ExternalIncludePath>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
@@ -58,6 +60,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
+      <AdditionalDependencies>version.lib;synchronization.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Client Release'">
@@ -85,9 +88,7 @@
   <ItemGroup>
     <ClCompile Include="plugin\bridge.cpp" />
     <ClCompile Include="plugin\dllmain.cpp" />
-    <ClCompile Include="plugin\live_context.cpp">
-      <WarningLevel>TurnOffAllWarnings</WarningLevel>
-    </ClCompile>
+    <ClCompile Include="plugin\live_context.cpp" />
     <ClCompile Include="plugin\plugin.cpp" />
     <ClCompile Include="$(GameSDKSourceDir)Basic.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>

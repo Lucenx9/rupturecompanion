@@ -7,18 +7,20 @@ in that same language inside the game.
 
 It is a port of the companion workflow from Project Zomboid to
 [AlienX's StarRupture Mod Loader](https://github.com/AlienXAXS/StarRupture-ModLoader).
-The plugin is read-only: it observes player state, inventory, equipment,
+The plugin is read-only: it observes player state, inventory, gems, equipment,
 skills and research progression, objectives, the current target or machine,
-environmental waves, map/base alerts, multiplayer session state, the screenshot,
-and session type. It never changes inventory, buildings, characters, or saves.
+environmental waves, map/base alerts, nearby replicated players, multiplayer
+session state, the screenshot, and session type. It never changes inventory,
+buildings, characters, or saves.
 
 ## Features
 
 - Native ImGui chat panel loaded by StarRupture Mod Loader
 - F10 toggle, Enter-to-send, retry, cancel, and confirmed new-chat reset
-- Live player vitals, inventory, equipment, skills, corporations, unlocks,
+- Live player vitals, inventory, gems, equipment, skills, corporations, unlocks,
   available technology, objectives, target machine status, power/crafting data,
-  environmental waves, map/base alerts, and multiplayer session state
+  environmental waves, map/base alerts, nearby players, and multiplayer session
+  state
 - Screenshot-aware answers through the logged-in Claude Code CLI
 - Automatic response-language matching for each player message
 - Six-turn conversational context and persistent `/web on` / `/web off` mode
@@ -149,9 +151,12 @@ replicated state about every 0.75 seconds and stores an immutable, size-limited
 JSON snapshot. The chat/render thread only copies that cache; it never walks
 Unreal objects directly. Missing or unavailable sections remain `null` and are
 listed explicitly, so the model is not encouraged to invent zeroes or stale
-facts. Global factory-wide Mass ECS storage is not claimed as available; the
-currently targeted or interacted building exposes its relevant status, grid
-power, crafting progress, queue, and item types when the game provides them.
+facts. Oversized snapshots are deterministically pruned while retaining core
+vitals and equipment. The backend labels every accepted snapshot as fresh or
+stale before it reaches the model. Global factory-wide Mass ECS entities and
+server-only storage are not claimed as available; the currently targeted or
+actively interacted building exposes its relevant status, grid power, crafting
+progress, queue, and item types when the client provides them.
 
 The native plugin writes a complete request to
 `StarRupture/Binaries/Win64/RuptureCompanion/question.txt`. The platform daemon
@@ -187,7 +192,8 @@ GitHub Actions compiles the C++20 plugin with Visual Studio against the official
 Game SDK for StarRupture build CL121391 and both the current Plugin SDK and the
 legacy v47 header. A push to `main` creates a release
 containing both DLL channels, their updater manifests and ZIPs, and the backend
-archive.
+archive. Release builds pin both SDK repositories, and the plugin disables live
+telemetry if the executable's product version is not CL121391.
 
 The generated Plugin SDK interface header is vendored under `include/` for
 reproducible local development; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

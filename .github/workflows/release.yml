@@ -85,13 +85,117 @@ jobs:
 
   release:
     needs: [verify-python, verify-plugin]
-    uses: AlienXAXS/StarRupture-Plugin-SDK/.github/workflows/plugin-release.yml@v1.17.3
-    with:
-      plugin_name: RuptureCompanion
-      solution_file: RuptureCompanion.sln
-      variant: Client
-      release_title: Rupture Companion
-    secrets: inherit
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: AlienXAXS/StarRupture-Plugin-SDK
+          ref: v1.17.3
+          path: plugin-sdk
+      - uses: actions/checkout@v4
+        with:
+          repository: AlienXAXS/StarRupture-Game-SDK
+          ref: 2c7d138506e42011d1ccf4ee044339c154b45b90
+          path: game-sdk
+      - uses: microsoft/setup-msbuild@v2
+      - name: Generate release tag
+        id: tag
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          function Parse-Semver([string]$value) {
+            if ($value -match '^v?(\d+)\.(\d+)\.(\d+)$') {
+              return @{
+                Major = [int]$Matches[1]
+                Minor = [int]$Matches[2]
+                Patch = [int]$Matches[3]
+              }
+            }
+            return $null
+          }
+
+          function Compare-Semver($left, $right) {
+            if ($left.Major -ne $right.Major) { return $left.Major - $right.Major }
+            if ($left.Minor -ne $right.Minor) { return $left.Minor - $right.Minor }
+            return $left.Patch - $right.Patch
+          }
+
+          $latest = $null
+          $tags = gh release list --limit 100 --json tagName |
+            ConvertFrom-Json |
+            Select-Object -ExpandProperty tagName
+          foreach ($candidate in $tags) {
+            $parsed = Parse-Semver $candidate
+            if ($parsed -and ($null -eq $latest -or (Compare-Semver $parsed $latest) -gt 0)) {
+              $latest = $parsed
+            }
+          }
+          if ($null -eq $latest) {
+            $latest = @{ Major = 0; Minor = 0; Patch = 0 }
+          }
+          $tag = "v$($latest.Major).$($latest.Minor + 1).0"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Build pinned current plugin
+        shell: pwsh
+        run: |
+          msbuild RuptureCompanion.sln `
+            /p:Configuration="Client Release" `
+            /p:Platform=x64 `
+            /p:GameSDKRoot="${{ github.workspace }}\game-sdk" `
+            /p:PluginSDKInclude="${{ github.workspace }}\plugin-sdk\include" `
+            /p:ModLoaderBuildTag="${{ steps.tag.outputs.tag }}" `
+            /m /v:minimal
+
+      - name: Package pinned current plugin
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.tag.outputs.tag }}"
+          $dll = "build\Client Release\Plugins\RuptureCompanion.dll"
+          Copy-Item $dll RuptureCompanion-Client.dll
+
+          $header = Get-Content "plugin-sdk\include\plugin_interface.h" -Raw
+          $minimum = [regex]::Match(
+            $header, '#define\s+PLUGIN_INTERFACE_VERSION_MIN\s+(\d+)'
+          ).Groups[1].Value
+          $maximum = [regex]::Match(
+            $header, '#define\s+PLUGIN_INTERFACE_VERSION_MAX\s+(\d+)'
+          ).Groups[1].Value
+          if (-not $minimum -or -not $maximum) {
+            throw "Could not read the pinned Plugin SDK interface range"
+          }
+
+          [ordered]@{
+            plugin_name = "RuptureCompanion"
+            version = $tag
+            interface_version_min = [int]$minimum
+            interface_version_max = [int]$maximum
+            download_url = "https://github.com/${{ github.repository }}/releases/download/$tag/RuptureCompanion-Client.dll"
+          } | ConvertTo-Json | Out-File RuptureCompanion-client-manifest.json -Encoding utf8NoBOM
+
+          New-Item -ItemType Directory -Force staging\Plugins | Out-Null
+          Copy-Item $dll staging\Plugins\RuptureCompanion.dll
+          [ordered]@{
+            manifest_url = "https://github.com/${{ github.repository }}/releases/latest/download/RuptureCompanion-client-manifest.json"
+          } | ConvertTo-Json | Out-File staging\Plugins\RuptureCompanion.json -Encoding utf8NoBOM
+          Compress-Archive -Path staging\* -DestinationPath "RuptureCompanion-Client-$tag.zip"
+
+      - name: Create release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.tag.outputs.tag }}"
+          gh release create $tag `
+            RuptureCompanion-Client.dll `
+            RuptureCompanion-client-manifest.json `
+            "RuptureCompanion-Client-$tag.zip" `
+            --title "Rupture Companion $tag" `
+            --generate-notes
 
   legacy:
     needs: release

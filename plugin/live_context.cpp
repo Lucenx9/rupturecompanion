@@ -1,3 +1,10 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "live_context.h"
 
 #include "plugin_interface.h"
@@ -9,10 +16,13 @@
 #include "Engine_classes.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <iomanip>
+#include <iterator>
 #include <locale>
 #include <map>
 #include <mutex>
@@ -23,15 +33,22 @@
 #include <utility>
 #include <vector>
 
+#include <windows.h>
+#include <winver.h>
+
 namespace RuptureCompanion::LiveContext
 {
 namespace
 {
 using Fields = std::vector<std::pair<std::string, std::string>>;
 
-constexpr float SampleIntervalSeconds = 0.75f;
+using SteadyClock = std::chrono::steady_clock;
+
+constexpr auto SampleInterval = std::chrono::milliseconds(750);
+constexpr auto WorldProbeInterval = std::chrono::seconds(2);
 constexpr int MaxInventorySlots = 256;
 constexpr int MaxInventoryItems = 128;
+constexpr int MaxNearbyPlayers = 8;
 constexpr int MaxObjectives = 32;
 constexpr int MaxSubObjectives = 64;
 constexpr int MaxInteractedItems = 32;
@@ -41,10 +58,65 @@ constexpr std::size_t MaxSnapshotBytes = 48 * 1024;
 
 IPluginSelf* g_self = nullptr;
 SDK::UWorld* g_world = nullptr;
-float g_sampleAccumulator = SampleIntervalSeconds;
+SteadyClock::time_point g_nextSampleAt{};
+SteadyClock::time_point g_nextWorldProbeAt{};
 std::mutex g_snapshotMutex;
 std::string g_snapshot;
 bool g_registered = false;
+std::atomic<DWORD> g_gameThreadId{0};
+
+bool CompatibleGameBuild()
+{
+    wchar_t executablePath[MAX_PATH]{};
+    if (GetModuleFileNameW(nullptr, executablePath, MAX_PATH) == 0)
+    {
+        return false;
+    }
+    DWORD unused = 0;
+    const DWORD infoSize = GetFileVersionInfoSizeW(executablePath, &unused);
+    if (infoSize == 0)
+    {
+        return false;
+    }
+    std::vector<std::byte> info(infoSize);
+    if (!GetFileVersionInfoW(executablePath, 0, infoSize, info.data()))
+    {
+        return false;
+    }
+
+    struct LanguageCodepage
+    {
+        WORD language;
+        WORD codepage;
+    };
+    LanguageCodepage* translations = nullptr;
+    UINT translationBytes = 0;
+    VerQueryValueW(info.data(), L"\\VarFileInfo\\Translation",
+        reinterpret_cast<void**>(&translations), &translationBytes);
+
+    wchar_t query[64]{};
+    if (translations != nullptr && translationBytes >= sizeof(LanguageCodepage))
+    {
+        swprintf_s(query, L"\\StringFileInfo\\%04x%04x\\ProductVersion",
+            translations[0].language, translations[0].codepage);
+    }
+    else
+    {
+        wcscpy_s(query, L"\\StringFileInfo\\040904b0\\ProductVersion");
+    }
+
+    wchar_t* productVersion = nullptr;
+    UINT productVersionLength = 0;
+    if (!VerQueryValueW(info.data(), query,
+            reinterpret_cast<void**>(&productVersion), &productVersionLength)
+        || productVersion == nullptr || productVersionLength == 0)
+    {
+        return false;
+    }
+    constexpr std::wstring_view RequiredSuffix = L"CL-121391";
+    const std::wstring_view actual(productVersion, productVersionLength - 1);
+    return actual.ends_with(RequiredSuffix);
+}
 
 std::string TruncateUtf8(std::string value, const std::size_t limit = MaxStringBytes)
 {
@@ -187,6 +259,15 @@ void AddNumber(Fields& fields, const std::string_view key, const double value)
     if (std::isfinite(value))
     {
         Add(fields, key, JsonNumber(value));
+    }
+}
+
+void AddSectionName(std::vector<std::string>& sections, const std::string_view name)
+{
+    std::string encoded = JsonString(name);
+    if (std::ranges::find(sections, encoded) == sections.end())
+    {
+        sections.push_back(std::move(encoded));
     }
 }
 
@@ -373,6 +454,25 @@ const char* SkillName(const SDK::ECrPlayerProgressionSkill skill)
     }
 }
 
+const char* ProfessionName(const SDK::EProfessionType profession)
+{
+    switch (profession)
+    {
+    case SDK::EProfessionType::Engineer:
+        return "engineer";
+    case SDK::EProfessionType::Soldier:
+        return "soldier";
+    case SDK::EProfessionType::Medic:
+        return "medic";
+    case SDK::EProfessionType::Scientist:
+        return "scientist";
+    case SDK::EProfessionType::NONE:
+        return "none";
+    default:
+        return "unknown";
+    }
+}
+
 void AddUnlockedFeature(
     std::vector<std::string>& features,
     const SDK::ECrCorporationUnlockedFeatures flags,
@@ -387,45 +487,132 @@ void AddUnlockedFeature(
     }
 }
 
-std::string AttributeJson(const SDK::FCrPlayerAttributeSaveData& attribute)
+std::string AttributeJson(
+    const SDK::FGameplayAttributeData& current,
+    const SDK::FGameplayAttributeData& minimum,
+    const SDK::FGameplayAttributeData& maximum)
 {
     Fields fields;
-    AddNumber(fields, "current", attribute.Current);
-    AddNumber(fields, "min", attribute.Min);
-    AddNumber(fields, "max", attribute.Max);
+    AddNumber(fields, "current", current.CurrentValue);
+    AddNumber(fields, "min", minimum.CurrentValue);
+    AddNumber(fields, "max", maximum.CurrentValue);
     return JsonObject(fields);
 }
 
 std::string BuildVitals(const SDK::ACrCharacterPlayerBase* player)
 {
-    const SDK::FCrCharacterPlayerSurvivalData data = player->GetCharacterSurvivalData();
     Fields fields;
-    Add(fields, "health", AttributeJson(data.Health));
-    Add(fields, "energy", AttributeJson(data.Energy));
-    Add(fields, "shield", AttributeJson(data.Shield));
-    Add(fields, "oxygen", AttributeJson(data.Oxygen));
-    Add(fields, "hydration", AttributeJson(data.Hydration));
-    Add(fields, "calories", AttributeJson(data.Calories));
-    Add(fields, "toxicity", AttributeJson(data.Toxicity));
-    Add(fields, "radiation", AttributeJson(data.Radiation));
-    Add(fields, "heat", AttributeJson(data.Heat));
-    Add(fields, "drain", AttributeJson(data.Drain));
-    Add(fields, "corrosion", AttributeJson(data.Corrosion));
-    Add(fields, "infection", AttributeJson(data.Infection));
-    Add(fields, "med_tool_charge", AttributeJson(data.MedToolCharge));
-    Add(fields, "grenade_charge", AttributeJson(data.GrenadeCharge));
-    Add(fields, "movement_speed_multiplier", AttributeJson(data.MovementSpeedMultiplier));
-    AddNumber(fields, "temperature", player->GetCurrentTemperature());
+    if (player->HealthAttributes != nullptr)
+    {
+        const auto* value = player->HealthAttributes;
+        Add(fields, "health", AttributeJson(
+            value->CurrentHealth, value->MinHealth, value->MaxHealth));
+    }
+    if (player->EnergyAttributes != nullptr)
+    {
+        const auto* value = player->EnergyAttributes;
+        Add(fields, "energy", AttributeJson(
+            value->CurrentEnergy, value->MinEnergy, value->MaxEnergy));
+    }
+    if (player->ShieldAttributes != nullptr)
+    {
+        const auto* value = player->ShieldAttributes;
+        Add(fields, "shield", AttributeJson(
+            value->CurrentShield, value->MinShield, value->MaxShield));
+    }
+    if (player->OxygenAttributes != nullptr)
+    {
+        const auto* value = player->OxygenAttributes;
+        Add(fields, "oxygen", AttributeJson(
+            value->CurrentOxygen, value->MinOxygen, value->MaxOxygen));
+    }
+    if (player->HydrationAttributes != nullptr)
+    {
+        const auto* value = player->HydrationAttributes;
+        Add(fields, "hydration", AttributeJson(
+            value->CurrentHydration, value->MinHydration, value->MaxHydration));
+    }
+    if (player->CaloriesAttributes != nullptr)
+    {
+        const auto* value = player->CaloriesAttributes;
+        Add(fields, "calories", AttributeJson(
+            value->CurrentCalories, value->MinCalories, value->MaxCalories));
+    }
+    if (player->ToxicityAttributes != nullptr)
+    {
+        const auto* value = player->ToxicityAttributes;
+        Add(fields, "toxicity", AttributeJson(
+            value->CurrentToxicity, value->MinToxicity, value->MaxToxicity));
+    }
+    if (player->RadiationAttributes != nullptr)
+    {
+        const auto* value = player->RadiationAttributes;
+        Add(fields, "radiation", AttributeJson(
+            value->CurrentRadiation, value->MinRadiation, value->MaxRadiation));
+    }
+    if (player->HeatAttributes != nullptr)
+    {
+        const auto* value = player->HeatAttributes;
+        Add(fields, "heat", AttributeJson(
+            value->CurrentHeat, value->MinHeat, value->MaxHeat));
+    }
+    if (player->DrainAttributes != nullptr)
+    {
+        const auto* value = player->DrainAttributes;
+        Add(fields, "drain", AttributeJson(
+            value->CurrentDrain, value->MinDrain, value->MaxDrain));
+    }
+    if (player->CorrosionAttributes != nullptr)
+    {
+        const auto* value = player->CorrosionAttributes;
+        Add(fields, "corrosion", AttributeJson(
+            value->CurrentCorrosion, value->MinCorrosion, value->MaxCorrosion));
+    }
+    if (player->InfectionAttributes != nullptr)
+    {
+        const auto* value = player->InfectionAttributes;
+        Add(fields, "infection", AttributeJson(
+            value->CurrentInfection, value->MinInfection, value->MaxInfection));
+    }
+    if (player->TemperatureAttributes != nullptr)
+    {
+        const auto* value = player->TemperatureAttributes;
+        Add(fields, "temperature", AttributeJson(
+            value->CurrentTemperature, value->MinTemperature, value->MaxTemperature));
+    }
+    if (player->MedToolChargeAttributes != nullptr)
+    {
+        const auto* value = player->MedToolChargeAttributes;
+        Add(fields, "med_tool_charge", AttributeJson(
+            value->CurrentMedToolCharge,
+            value->MinMedToolCharge,
+            value->MaxMedToolCharge));
+    }
+    if (player->GrenadeChargeAttributes != nullptr)
+    {
+        const auto* value = player->GrenadeChargeAttributes;
+        Add(fields, "grenade_charge", AttributeJson(
+            value->CurrentGrenadeCharge,
+            value->MinGrenadeCharge,
+            value->MaxGrenadeCharge));
+    }
+    if (player->MovementSpeedMultiplierAttributes != nullptr)
+    {
+        const auto* value = player->MovementSpeedMultiplierAttributes;
+        Add(fields, "movement_speed_multiplier", AttributeJson(
+            value->CurrentMovementSpeedMultiplier,
+            value->MinMovementSpeedMultiplier,
+            value->MaxMovementSpeedMultiplier));
+    }
     return JsonObject(fields);
 }
 
-std::string BuildInventory(
-    SDK::ACrCharacterPlayerBase* player,
+std::string BuildItemContainer(
+    SDK::UCrInventoryComponent* inventory,
+    SDK::UCrInventoryItemsStoreComponent* store,
     bool& truncated,
     bool& available)
 {
-    SDK::UCrInventoryComponent* inventory = player->BP_GetInventory();
-    SDK::UCrInventoryItemsStoreComponent* store = player->InventoryItemsStore;
     if (inventory == nullptr || store == nullptr)
     {
         available = false;
@@ -435,9 +622,7 @@ std::string BuildInventory(
     const int slotCount = inventory->Slots.Num();
     const int safeSlotCount = std::clamp(slotCount, 0, MaxInventorySlots);
     truncated = slotCount > MaxInventorySlots;
-    std::map<std::string, std::int64_t> itemAmounts;
     std::set<std::string> seenItemIds;
-    int occupiedSlots = 0;
     for (int index = 0; index < safeSlotCount; ++index)
     {
         if (!inventory->Slots.IsValidIndex(index))
@@ -449,22 +634,40 @@ std::string BuildInventory(
         {
             continue;
         }
-        if (!seenItemIds.insert(GuidString(slot.ItemId.Handle)).second)
+        seenItemIds.insert(GuidString(slot.ItemId.Handle));
+    }
+
+    std::map<std::string, std::int64_t> itemAmounts;
+    std::set<std::string> seenItemTypes;
+    const auto& storeItems = store->ItemsArray.Items;
+    const int storeItemCount = std::clamp(storeItems.Num(), 0, MaxInventorySlots);
+    truncated = truncated || storeItems.Num() > MaxInventorySlots;
+    for (int index = 0; index < storeItemCount; ++index)
+    {
+        if (!storeItems.IsValidIndex(index))
         {
             continue;
         }
-        const SDK::FAuItemEntry entry = store->GetItemCopy(slot.ItemId);
-        if (entry.Amount <= 0 || entry.ItemDataInstance == nullptr)
+        const SDK::UAuItemDataBase* item = storeItems[index].ItemTypeGCHolder;
+        if (item == nullptr)
         {
             continue;
         }
-        std::string name = ItemName(entry.ItemDataInstance);
-        if (name.empty())
+        std::string identity = TruncateUtf8(item->UniqueItemName.ToString());
+        if (identity.empty())
+        {
+            identity = ObjectName(item);
+        }
+        std::string name = ItemName(item);
+        if (identity.empty() || name.empty() || !seenItemTypes.insert(identity).second)
         {
             continue;
         }
-        ++occupiedSlots;
-        itemAmounts[std::move(name)] += entry.Amount;
+        const int amount = inventory->BP_GetItemAmount(item);
+        if (amount > 0)
+        {
+            itemAmounts[std::move(name)] += amount;
+        }
     }
 
     std::vector<std::string> items;
@@ -485,10 +688,35 @@ std::string BuildInventory(
     Add(fields, "grid_rows", JsonInteger(inventory->GridRows));
     Add(fields, "capacity_cells", JsonInteger(
             std::max(0, inventory->GridColumns) * std::max(0, inventory->GridRows)));
-    Add(fields, "occupied_slots", JsonInteger(occupiedSlots));
+    Add(fields, "item_stack_count", JsonInteger(
+            static_cast<std::int64_t>(seenItemIds.size())));
     Add(fields, "items", JsonArray(items));
     Add(fields, "truncated", JsonBoolean(truncated));
     return JsonObject(fields);
+}
+
+std::string BuildInventory(
+    SDK::ACrCharacterPlayerBase* player,
+    bool& truncated,
+    bool& available)
+{
+    return BuildItemContainer(
+        player->InventoryComponent,
+        player->InventoryItemsStore,
+        truncated,
+        available);
+}
+
+std::string BuildGems(
+    SDK::ACrCharacterPlayerBase* player,
+    bool& truncated,
+    bool& available)
+{
+    return BuildItemContainer(
+        player->InventoryGemsComponent,
+        player->GemItemsStore,
+        truncated,
+        available);
 }
 
 std::string BuildEquipment(SDK::ACrCharacterPlayerBase* player)
@@ -669,7 +897,11 @@ std::string BuildProgression(
     return JsonObject(fields);
 }
 
-std::string BuildSession(SDK::ACrGameStateBase* gameState, bool& available)
+std::string BuildSession(
+    SDK::ACrGameStateBase* gameState,
+    SDK::ACrCharacterPlayerBase* localPlayer,
+    bool& available,
+    bool& truncated)
 {
     if (gameState == nullptr)
     {
@@ -684,6 +916,56 @@ std::string BuildSession(SDK::ACrGameStateBase* gameState, bool& available)
     Add(fields, "paused", JsonBoolean(gameState->bIsGamePaused));
     Add(fields, "cutscene_active", JsonBoolean(gameState->IsCutsceneActive()));
     AddNumber(fields, "server_world_time_seconds", gameState->GetServerWorldTimeSeconds());
+
+    struct NearbyPlayer
+    {
+        double distanceMeters;
+        SDK::ACrPlayerStateBase* state;
+    };
+    std::vector<NearbyPlayer> nearby;
+    const int playerCount = std::clamp(gameState->PlayerArray.Num(), 0, 64);
+    truncated = gameState->PlayerArray.Num() > 64;
+    const SDK::FVector localPosition = localPlayer->K2_GetActorLocation();
+    for (int index = 0; index < playerCount; ++index)
+    {
+        if (!gameState->PlayerArray.IsValidIndex(index))
+        {
+            continue;
+        }
+        SDK::APlayerState* baseState = gameState->PlayerArray[index];
+        if (baseState == nullptr
+            || !baseState->IsA(SDK::ACrPlayerStateBase::StaticClass()))
+        {
+            continue;
+        }
+        auto* state = static_cast<SDK::ACrPlayerStateBase*>(baseState);
+        if (state->CrChar == nullptr || state->CrChar == localPlayer)
+        {
+            continue;
+        }
+        nearby.push_back({
+            localPosition.GetDistanceToInMeters(state->CrChar->K2_GetActorLocation()),
+            state});
+    }
+    std::ranges::sort(nearby, {}, &NearbyPlayer::distanceMeters);
+    if (nearby.size() > MaxNearbyPlayers)
+    {
+        nearby.resize(MaxNearbyPlayers);
+        truncated = true;
+    }
+    std::vector<std::string> nearbyEntries;
+    nearbyEntries.reserve(nearby.size());
+    for (const NearbyPlayer& entry : nearby)
+    {
+        Fields nearbyFields;
+        AddNumber(nearbyFields, "distance_m", entry.distanceMeters);
+        Add(nearbyFields, "profession", JsonString(ProfessionName(entry.state->Profession)));
+        Add(nearbyFields, "dead", JsonBoolean(entry.state->bDead));
+        Add(nearbyFields, "incapacitated", JsonBoolean(entry.state->bIncapacitated));
+        nearbyEntries.push_back(JsonObject(nearbyFields));
+    }
+    Add(fields, "nearby_players", JsonArray(nearbyEntries));
+    Add(fields, "nearby_players_truncated", JsonBoolean(truncated));
     return JsonObject(fields);
 }
 
@@ -872,7 +1154,7 @@ std::string BuildTarget(
     }
     if (target == nullptr)
     {
-        available = false;
+        available = true;
         return "null";
     }
     available = true;
@@ -934,7 +1216,8 @@ std::string BuildTarget(
         Add(fields, "building", JsonObject(buildingFields));
     }
 
-    if (controller != nullptr)
+    if (controller != nullptr
+        && controller->CurrentInteractableActorWithActiveInteraction == target)
     {
         std::vector<std::string> interactedItems;
         const int count = std::min(
@@ -995,7 +1278,8 @@ std::string BuildBase(SDK::ACrGameStateBase* gameState, bool& available)
 std::string BuildUnavailableSnapshot(const std::string_view reason)
 {
     std::vector<std::string> missing = {
-        JsonString("player"), JsonString("inventory"), JsonString("equipment"),
+        JsonString("player"), JsonString("inventory"), JsonString("gems"),
+        JsonString("equipment"),
         JsonString("session"), JsonString("progression"), JsonString("objectives"),
         JsonString("environment"), JsonString("target"), JsonString("base")};
     Fields status;
@@ -1047,11 +1331,23 @@ std::string Capture(SDK::UWorld* world)
         player, inventoryTruncated, inventoryAvailable);
     if (!inventoryAvailable)
     {
-        missing.push_back(JsonString("inventory"));
+        AddSectionName(missing, "inventory");
     }
     if (inventoryTruncated)
     {
-        truncatedSections.push_back(JsonString("inventory"));
+        AddSectionName(truncatedSections, "inventory");
+    }
+
+    bool gemsAvailable = false;
+    bool gemsTruncated = false;
+    const std::string gems = BuildGems(player, gemsTruncated, gemsAvailable);
+    if (!gemsAvailable)
+    {
+        AddSectionName(missing, "gems");
+    }
+    if (gemsTruncated)
+    {
+        AddSectionName(truncatedSections, "gems");
     }
 
     bool objectivesAvailable = false;
@@ -1060,18 +1356,18 @@ std::string Capture(SDK::UWorld* world)
         gameState, objectivesTruncated, objectivesAvailable);
     if (!objectivesAvailable)
     {
-        missing.push_back(JsonString("objectives"));
+        AddSectionName(missing, "objectives");
     }
     if (objectivesTruncated)
     {
-        truncatedSections.push_back(JsonString("objectives"));
+        AddSectionName(truncatedSections, "objectives");
     }
 
     bool environmentAvailable = false;
     const std::string environment = BuildEnvironment(world, gameState, environmentAvailable);
     if (!environmentAvailable)
     {
-        missing.push_back(JsonString("environment"));
+        AddSectionName(missing, "environment");
     }
 
     bool targetAvailable = false;
@@ -1079,25 +1375,31 @@ std::string Capture(SDK::UWorld* world)
     const std::string target = BuildTarget(world, player, targetAvailable, targetTruncated);
     if (!targetAvailable)
     {
-        missing.push_back(JsonString("target"));
+        AddSectionName(missing, "target");
     }
     if (targetTruncated)
     {
-        truncatedSections.push_back(JsonString("target"));
+        AddSectionName(truncatedSections, "target");
     }
 
     bool baseAvailable = false;
     const std::string base = BuildBase(gameState, baseAvailable);
     if (!baseAvailable)
     {
-        missing.push_back(JsonString("base"));
+        AddSectionName(missing, "base");
     }
 
     bool sessionAvailable = false;
-    const std::string session = BuildSession(gameState, sessionAvailable);
+    bool sessionTruncated = false;
+    const std::string session = BuildSession(
+        gameState, player, sessionAvailable, sessionTruncated);
     if (!sessionAvailable)
     {
-        missing.push_back(JsonString("session"));
+        AddSectionName(missing, "session");
+    }
+    if (sessionTruncated)
+    {
+        AddSectionName(truncatedSections, "session");
     }
 
     bool progressionAvailable = false;
@@ -1106,16 +1408,18 @@ std::string Capture(SDK::UWorld* world)
         gameState, controller, progressionAvailable, progressionTruncated);
     if (!progressionAvailable)
     {
-        missing.push_back(JsonString("progression"));
+        AddSectionName(missing, "progression");
     }
     if (progressionTruncated)
     {
-        truncatedSections.push_back(JsonString("progression"));
+        AddSectionName(truncatedSections, "progression");
     }
 
-    const SDK::FCrCharacterPlayerSurvivalData survival = player->GetCharacterSurvivalData();
     Fields statusFields;
-    Add(statusFields, "dead", JsonBoolean(survival.bDead));
+    if (player->CrPS != nullptr)
+    {
+        Add(statusFields, "dead", JsonBoolean(player->CrPS->bDead));
+    }
     Add(statusFields, "incapacitated", JsonBoolean(player->IsIncapacitated()));
     Add(statusFields, "sprinting", JsonBoolean(player->IsSprinting()));
     Add(statusFields, "afk", JsonBoolean(player->IsAFK()));
@@ -1123,26 +1427,24 @@ std::string Capture(SDK::UWorld* world)
     Add(statusFields, "safe_interior", JsonBoolean(player->IsInSafeInterior()));
     Add(statusFields, "protected", JsonBoolean(player->IsProtected()));
     Add(statusFields, "in_combat", JsonBoolean(player->bIsInCombatState));
-    const std::string profession = TruncateUtf8(player->GetProfessionName().ToString());
-    if (!profession.empty())
-    {
-        Add(statusFields, "profession", JsonString(profession));
-    }
+    Add(statusFields, "profession", JsonString(ProfessionName(player->Profession)));
 
     const SDK::FVector location = player->K2_GetActorLocation();
     const SDK::FRotator rotation = player->K2_GetActorRotation();
     Fields positionFields;
-    AddNumber(positionFields, "x", location.X);
-    AddNumber(positionFields, "y", location.Y);
-    AddNumber(positionFields, "z", location.Z);
-    AddNumber(positionFields, "yaw", rotation.Yaw);
+    AddNumber(positionFields, "x_m", location.X / 100.0);
+    AddNumber(positionFields, "y_m", location.Y / 100.0);
+    AddNumber(positionFields, "z_m", location.Z / 100.0);
+    AddNumber(positionFields, "yaw_degrees", rotation.Yaw);
 
-    Fields playerFields;
-    Add(playerFields, "status", JsonObject(statusFields));
-    Add(playerFields, "position", JsonObject(positionFields));
-    Add(playerFields, "vitals", BuildVitals(player));
+    Fields corePlayerFields;
+    Add(corePlayerFields, "status", JsonObject(statusFields));
+    Add(corePlayerFields, "position", JsonObject(positionFields));
+    Add(corePlayerFields, "vitals", BuildVitals(player));
+    Add(corePlayerFields, "equipment", BuildEquipment(player));
+    Fields playerFields = corePlayerFields;
     Add(playerFields, "inventory", inventory);
-    Add(playerFields, "equipment", BuildEquipment(player));
+    Add(playerFields, "gems", gems);
 
     Fields snapshotStatus;
     Add(snapshotStatus, "available", "true");
@@ -1169,7 +1471,42 @@ std::string Capture(SDK::UWorld* world)
     std::string snapshot = JsonObject(root);
     if (snapshot.size() > MaxSnapshotBytes)
     {
-        return BuildUnavailableSnapshot("snapshot_size_limit");
+        AddSectionName(truncatedSections, "inventory");
+        AddSectionName(truncatedSections, "gems");
+        AddSectionName(truncatedSections, "progression");
+        AddSectionName(truncatedSections, "objectives");
+        Fields prunedStatus;
+        Add(prunedStatus, "available", "true");
+        Add(prunedStatus, "partial", "true");
+        Add(prunedStatus, "reason", JsonString("snapshot_pruned"));
+        Add(prunedStatus, "missing_sections", JsonArray(missing));
+        Add(prunedStatus, "truncated_sections", JsonArray(truncatedSections));
+        Fields prunedPlayer = corePlayerFields;
+        Add(prunedPlayer, "inventory", "null");
+        Add(prunedPlayer, "gems", "null");
+        Fields prunedRoot;
+        Add(prunedRoot, "schema_version", "1");
+        Add(prunedRoot, "captured_at_unix_ms", JsonInteger(UnixTimeMilliseconds()));
+        Add(prunedRoot, "source", JsonObject(sourceFields));
+        Add(prunedRoot, "status", JsonObject(prunedStatus));
+        Add(prunedRoot, "session", session);
+        Add(prunedRoot, "player", JsonObject(prunedPlayer));
+        Add(prunedRoot, "progression", "null");
+        Add(prunedRoot, "objectives", "null");
+        Add(prunedRoot, "environment", environment);
+        Add(prunedRoot, "target", target);
+        Add(prunedRoot, "base", base);
+        snapshot = JsonObject(prunedRoot);
+        if (snapshot.size() > MaxSnapshotBytes)
+        {
+            Fields minimalRoot;
+            Add(minimalRoot, "schema_version", "1");
+            Add(minimalRoot, "captured_at_unix_ms", JsonInteger(UnixTimeMilliseconds()));
+            Add(minimalRoot, "source", JsonObject(sourceFields));
+            Add(minimalRoot, "status", JsonObject(prunedStatus));
+            Add(minimalRoot, "player", JsonObject(corePlayerFields));
+            snapshot = JsonObject(minimalRoot);
+        }
     }
     return snapshot;
 }
@@ -1180,10 +1517,42 @@ void StoreSnapshot(std::string snapshot)
     g_snapshot = std::move(snapshot);
 }
 
+SDK::UWorld* RecoverCurrentWorld()
+{
+    if (g_self == nullptr || g_self->hooks == nullptr
+        || g_self->hooks->ObjectWalker == nullptr)
+    {
+        return nullptr;
+    }
+    IPluginObjectWalker* walker = g_self->hooks->ObjectWalker;
+    if (!walker->IsReady())
+    {
+        return nullptr;
+    }
+    PluginObjectInfo worlds[32]{};
+    const int matches = walker->FindObjectsByClassNameInto(
+        "World", PluginObjectLookup_InstanceOnly, worlds, static_cast<int>(std::size(worlds)));
+    const int count = std::clamp(matches, 0, static_cast<int>(std::size(worlds)));
+    for (int index = 0; index < count; ++index)
+    {
+        auto* world = static_cast<SDK::UWorld*>(worlds[index].object);
+        if (world == nullptr)
+        {
+            continue;
+        }
+        SDK::APawn* pawn = SDK::UGameplayStatics::GetPlayerPawn(world, 0);
+        if (pawn != nullptr && pawn->IsA(SDK::ACrCharacterPlayerBase::StaticClass()))
+        {
+            return world;
+        }
+    }
+    return nullptr;
+}
+
 void OnWorldBeginPlay(SDK::UWorld* world)
 {
     g_world = world;
-    g_sampleAccumulator = SampleIntervalSeconds;
+    g_nextSampleAt = SteadyClock::now();
     StoreSnapshot(BuildUnavailableSnapshot("waiting_for_local_player"));
 }
 
@@ -1192,30 +1561,34 @@ void OnWorldEndPlay(SDK::UWorld* world, const char*)
     if (world == g_world)
     {
         g_world = nullptr;
-        g_sampleAccumulator = SampleIntervalSeconds;
+        g_nextWorldProbeAt = SteadyClock::now() + WorldProbeInterval;
         StoreSnapshot(BuildUnavailableSnapshot("world_ended"));
     }
 }
 
-void OnEngineTick(const float deltaSeconds)
+void OnEngineTick(const float)
 {
+    g_gameThreadId.store(GetCurrentThreadId(), std::memory_order_release);
+    const SteadyClock::time_point now = SteadyClock::now();
     if (g_world == nullptr)
     {
+        if (now < g_nextWorldProbeAt)
+        {
+            return;
+        }
+        g_nextWorldProbeAt = now + WorldProbeInterval;
+        g_world = RecoverCurrentWorld();
+        if (g_world == nullptr)
+        {
+            return;
+        }
+        g_nextSampleAt = now;
+    }
+    if (now < g_nextSampleAt)
+    {
         return;
     }
-    if (deltaSeconds > 0.0f && deltaSeconds <= 5.0f)
-    {
-        g_sampleAccumulator += deltaSeconds;
-    }
-    else
-    {
-        g_sampleAccumulator = SampleIntervalSeconds;
-    }
-    if (g_sampleAccumulator < SampleIntervalSeconds)
-    {
-        return;
-    }
-    g_sampleAccumulator = 0.0f;
+    g_nextSampleAt = now + SampleInterval;
     try
     {
         StoreSnapshot(Capture(g_world));
@@ -1229,29 +1602,13 @@ void OnEngineTick(const float deltaSeconds)
         }
     }
 }
-} // namespace
 
-bool Initialize(IPluginSelf* self)
+struct GameThreadCleanup
 {
-    if (g_registered)
-    {
-        return true;
-    }
-    g_self = self;
-    StoreSnapshot(BuildUnavailableSnapshot("world_unavailable"));
-    if (self == nullptr || self->hooks == nullptr || self->hooks->Engine == nullptr
-        || self->hooks->World == nullptr)
-    {
-        return false;
-    }
-    self->hooks->Engine->RegisterOnTick(&OnEngineTick);
-    self->hooks->World->RegisterOnWorldBeginPlay(&OnWorldBeginPlay);
-    self->hooks->World->RegisterOnBeforeWorldEndPlay(&OnWorldEndPlay);
-    g_registered = true;
-    return true;
-}
+    volatile LONG completed = 0;
+};
 
-void Shutdown()
+void UnregisterOnGameThread(void* context)
 {
     if (g_registered && g_self != nullptr && g_self->hooks != nullptr)
     {
@@ -1264,9 +1621,72 @@ void Shutdown()
             g_self->hooks->World->UnregisterOnWorldBeginPlay(&OnWorldBeginPlay);
             g_self->hooks->World->UnregisterOnBeforeWorldEndPlay(&OnWorldEndPlay);
         }
+        g_registered = false;
+        g_world = nullptr;
+    }
+    if (context != nullptr)
+    {
+        auto* cleanup = static_cast<GameThreadCleanup*>(context);
+        InterlockedExchange(&cleanup->completed, 1);
+    }
+}
+} // namespace
+
+bool Initialize(IPluginSelf* self)
+{
+    if (g_registered)
+    {
+        return true;
+    }
+    g_self = self;
+    StoreSnapshot(BuildUnavailableSnapshot("world_unavailable"));
+    if (!CompatibleGameBuild())
+    {
+        StoreSnapshot(BuildUnavailableSnapshot("unsupported_game_build"));
+        return false;
+    }
+    if (self == nullptr || self->hooks == nullptr || self->hooks->Engine == nullptr
+        || self->hooks->Engine->PostToGameThread == nullptr
+        || self->hooks->World == nullptr)
+    {
+        return false;
+    }
+    self->hooks->Engine->RegisterOnTick(&OnEngineTick);
+    self->hooks->World->RegisterOnWorldBeginPlay(&OnWorldBeginPlay);
+    self->hooks->World->RegisterOnBeforeWorldEndPlay(&OnWorldEndPlay);
+    g_registered = true;
+    g_nextWorldProbeAt = SteadyClock::now();
+    return true;
+}
+
+void Shutdown()
+{
+    if (g_registered && g_self != nullptr && g_self->hooks != nullptr
+        && g_self->hooks->Engine != nullptr)
+    {
+        const DWORD gameThreadId = g_gameThreadId.load(std::memory_order_acquire);
+        if (gameThreadId != 0 && gameThreadId == GetCurrentThreadId())
+        {
+            UnregisterOnGameThread(nullptr);
+        }
+        else
+        {
+            GameThreadCleanup cleanup;
+            g_self->hooks->Engine->PostToGameThread(&UnregisterOnGameThread, &cleanup);
+            // This second callback is exported by KernelBase, not this DLL. It
+            // wakes us only after the plugin cleanup callback has returned.
+            g_self->hooks->Engine->PostToGameThread(
+                &WakeByAddressSingle, const_cast<LONG*>(&cleanup.completed));
+            LONG pending = 0;
+            while (InterlockedCompareExchange(&cleanup.completed, 1, 1) == 0)
+            {
+                WaitOnAddress(&cleanup.completed, &pending, sizeof(pending), INFINITE);
+            }
+        }
     }
     g_registered = false;
     g_world = nullptr;
+    g_gameThreadId.store(0, std::memory_order_release);
     g_self = nullptr;
     StoreSnapshot(BuildUnavailableSnapshot("plugin_stopped"));
 }

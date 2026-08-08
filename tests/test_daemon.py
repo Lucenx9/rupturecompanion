@@ -9,7 +9,12 @@ import daemon
 def live_snapshot(**overrides):
     snapshot = {
         "schema_version": 1,
-        "captured_at_unix_ms": 1_800_000_000_000,
+        "captured_at_unix_ms": 1_700_000_000_000,
+        "source": {
+            "kind": "client_observed",
+            "game_sdk_build": "CL121391",
+            "sample_interval_ms": 750,
+        },
         "status": {
             "available": True,
             "partial": False,
@@ -111,6 +116,35 @@ def test_parse_request_discards_duplicate_live_context_markers():
         "Question",
         "Session mode: Standalone",
     )
+
+
+def test_parse_request_preserves_unicode_line_separators_inside_live_json():
+    snapshot = live_snapshot(
+        player={"inventory": {"items": [{"name": "Iron\u2028Ore", "amount": 2}]}}
+    )
+    request = (
+        "v1|11|session-live|Question\n"
+        f"{daemon.LIVE_CONTEXT_MARKER}\n"
+        f"{json.dumps(snapshot, ensure_ascii=False, separators=(',', ':'))}\n"
+        f"{daemon.END_MARKER}\n"
+    )
+
+    parsed = daemon.parse_request(request)
+
+    assert parsed is not None
+    assert "Iron\u2028Ore" in parsed[3]
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "v1|1|bad session|Question",
+        f"v1|1|{'a' * (daemon.MAX_SESSION_ID_BYTES + 1)}|Question",
+        f"v1|1|session|{'q' * (daemon.MAX_QUESTION_BYTES + 1)}",
+    ],
+)
+def test_parse_request_rejects_unbounded_identity_fields(header):
+    assert daemon.parse_request(f"{header}\n{daemon.END_MARKER}\n") is None
 
 
 def test_read_request_rejects_oversized_or_invalid_utf8(tmp_path, monkeypatch):

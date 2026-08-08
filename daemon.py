@@ -1,4 +1,3 @@
-import json
 import os
 import re
 import sys
@@ -23,7 +22,9 @@ END_MARKER = "__RC_END__"
 LIVE_CONTEXT_MARKER = "__RC_LIVE_CONTEXT_V1__"
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_CONTEXT_BYTES = 56 * 1024
-MAX_LIVE_CONTEXT_BYTES = 48 * 1024
+MAX_LIVE_CONTEXT_BYTES = ai_backend.MAX_LIVE_CONTEXT_BYTES
+MAX_SESSION_ID_BYTES = 128
+MAX_QUESTION_BYTES = 8 * 1024
 MAX_HISTORY_TURNS = ai_backend.HISTORY_TURNS
 POLL_SECONDS = 0.25
 READY_PROTOCOL_VERSION = 1
@@ -33,6 +34,7 @@ STEAM_ROOTS = (
     Path.home() / ".local/share/Steam",
     Path.home() / ".steam/steam",
 )
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class DaemonAlreadyRunning(Exception):
@@ -141,61 +143,19 @@ def acquire_lock(identity: str | None = None) -> TextIO:
     return lock
 
 
-def _json_object_without_duplicate_keys(
-    pairs: list[tuple[str, object]],
-) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _reject_non_finite_json(value: str) -> object:
-    raise ValueError(f"invalid JSON number: {value}")
-
-
-def _valid_string_list(value: object) -> bool:
-    return isinstance(value, list) and all(isinstance(item, str) for item in value)
-
-
 def _validated_live_context(raw: str) -> str | None:
-    if not raw or len(raw.encode("utf-8")) > MAX_LIVE_CONTEXT_BYTES:
-        return None
-    try:
-        value = json.loads(
-            raw,
-            object_pairs_hook=_json_object_without_duplicate_keys,
-            parse_constant=_reject_non_finite_json,
-        )
-    except (json.JSONDecodeError, RecursionError, UnicodeError, ValueError):
-        return None
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
-        return None
-    captured_at = value.get("captured_at_unix_ms")
-    status = value.get("status")
-    if (
-        not isinstance(captured_at, int)
-        or isinstance(captured_at, bool)
-        or captured_at < 0
-        or not isinstance(status, dict)
-        or not isinstance(status.get("available"), bool)
-        or not isinstance(status.get("partial"), bool)
-        or not _valid_string_list(status.get("missing_sections"))
-        or not _valid_string_list(status.get("truncated_sections"))
-    ):
-        return None
-    normalized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    return (
-        normalized
-        if len(normalized.encode("utf-8")) <= MAX_LIVE_CONTEXT_BYTES
-        else None
-    )
+    return ai_backend.validate_live_context(raw)
+
+
+def _protocol_lines(text: str) -> list[str]:
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line.removesuffix("\r") for line in lines]
 
 
 def normalize_context(context: str) -> str:
-    lines = context.splitlines()
+    lines = _protocol_lines(context)
     marker_indexes = [
         index for index, line in enumerate(lines) if line == LIVE_CONTEXT_MARKER
     ]
@@ -226,14 +186,22 @@ def normalize_context(context: str) -> str:
 
 
 def parse_request(text: str) -> tuple[int, str, str, str] | None:
-    lines = text.splitlines()
+    lines = _protocol_lines(text)
     if len(lines) < 2 or lines[-1] != END_MARKER:
         return None
     fields = lines[0].split("|", 3)
     if len(fields) != 4 or fields[0] != "v1":
         return None
     _, sequence, session_id, question = fields
-    if not session_id.strip() or not question.strip():
+    session_id = session_id.strip()
+    question = question.strip()
+    if (
+        not session_id
+        or len(session_id.encode("utf-8")) > MAX_SESSION_ID_BYTES
+        or SESSION_ID_PATTERN.fullmatch(session_id) is None
+        or not question
+        or len(question.encode("utf-8")) > MAX_QUESTION_BYTES
+    ):
         return None
     try:
         parsed_sequence = int(sequence)
@@ -242,13 +210,13 @@ def parse_request(text: str) -> tuple[int, str, str, str] | None:
     if parsed_sequence < 0:
         return None
     context = normalize_context("\n".join(lines[1:-1]).strip())
-    return parsed_sequence, session_id.strip(), question.strip(), context
+    return parsed_sequence, session_id, question, context
 
 
 def _safe_answer(text: str) -> str:
     return "\n".join(
         f"[{END_MARKER}]" if line == END_MARKER else line
-        for line in text.strip().splitlines()
+        for line in _protocol_lines(text.strip())
     )
 
 
@@ -275,7 +243,7 @@ def cancellation_requested(sequence: int, session_id: str) -> bool:
         text = (bridge_dir() / "cancel.txt").read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return False
-    return text.splitlines() == [f"v1|{sequence}|{session_id}", END_MARKER]
+    return _protocol_lines(text) == [f"v1|{sequence}|{session_id}", END_MARKER]
 
 
 def handle(
@@ -337,9 +305,9 @@ def read_request() -> str:
 
 def read_answer_identity() -> tuple[int, str] | None:
     try:
-        header = (
-            (bridge_dir() / "answer.txt").read_text(encoding="utf-8").splitlines()[0]
-        )
+        header = _protocol_lines(
+            (bridge_dir() / "answer.txt").read_text(encoding="utf-8")
+        )[0]
     except (OSError, UnicodeDecodeError, IndexError):
         return None
     fields = header.split("|")
