@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <iterator>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -24,6 +25,8 @@ using namespace std::chrono_literals;
 constexpr std::size_t MaxMessages = 100;
 constexpr std::chrono::seconds RequestTimeout = 210s;
 constexpr std::size_t InputCapacity = 2048;
+constexpr const char* SourceBlockSeparator = "\n\n__RC_SOURCES_V1__\n";
+constexpr std::size_t MaxSources = 3;
 
 #ifndef MODLOADER_BUILD_TAG
 #define MODLOADER_BUILD_TAG "dev"
@@ -40,6 +43,8 @@ struct Message
 
     Author author;
     std::string text;
+    std::string sourcesHeading;
+    std::vector<std::string> sources;
 };
 
 struct ChatState
@@ -126,7 +131,33 @@ std::string Trim(std::string value)
 
 void AddMessageLocked(const Message::Author author, std::string text)
 {
-    g_chat.messages.push_back(Message{author, std::move(text)});
+    Message message{author, std::move(text), {}, {}};
+    const std::size_t marker = message.text.rfind(SourceBlockSeparator);
+    if (author == Message::Author::Companion && marker != std::string::npos)
+    {
+        std::istringstream sourceBlock(
+            message.text.substr(marker + std::char_traits<char>::length(SourceBlockSeparator)));
+        std::string heading;
+        std::vector<std::string> sources;
+        if (std::getline(sourceBlock, heading) && !heading.empty())
+        {
+            std::string source;
+            while (sources.size() < MaxSources && std::getline(sourceBlock, source))
+            {
+                if (!source.empty())
+                {
+                    sources.push_back(std::move(source));
+                }
+            }
+        }
+        if (!sources.empty())
+        {
+            message.text.erase(marker);
+            message.sourcesHeading = std::move(heading);
+            message.sources = std::move(sources);
+        }
+    }
+    g_chat.messages.push_back(std::move(message));
     while (g_chat.messages.size() > MaxMessages)
     {
         g_chat.messages.erase(g_chat.messages.begin());
@@ -398,8 +429,9 @@ void RenderPanel(IModLoaderImGui* ui)
 
         if (ui->BeginChild("##Transcript", 0.0f, -82.0f, true))
         {
-            for (const Message& message : messages)
+            for (std::size_t messageIndex = 0; messageIndex < messages.size(); ++messageIndex)
             {
+                const Message& message = messages[messageIndex];
                 switch (message.author)
                 {
                 case Message::Author::Player:
@@ -413,6 +445,25 @@ void RenderPanel(IModLoaderImGui* ui)
                     break;
                 }
                 ui->TextWrapped(message.text.c_str());
+                if (!message.sources.empty())
+                {
+                    ui->TextDisabled(message.sourcesHeading.c_str());
+                    ui->BeginDisabled(true);
+                    for (std::size_t sourceIndex = 0; sourceIndex < message.sources.size();
+                         ++sourceIndex)
+                    {
+                        if (sourceIndex > 0)
+                        {
+                            ui->SameLine(0.0f, 6.0f);
+                        }
+                        ui->PushIDInt(static_cast<int>(messageIndex));
+                        ui->PushIDInt(static_cast<int>(sourceIndex));
+                        ui->SmallButton(message.sources[sourceIndex].c_str());
+                        ui->PopID();
+                        ui->PopID();
+                    }
+                    ui->EndDisabled();
+                }
                 ui->Spacing();
             }
             if (scrollToBottom)
