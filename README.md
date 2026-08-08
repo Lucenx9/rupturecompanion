@@ -1,8 +1,8 @@
 # Rupture Companion
 
-Rupture Companion is an English in-game AI chat for **StarRupture**. Press
-**F10**, ask a question, and the companion captures the current screen and
-returns concise advice inside the game.
+Rupture Companion is an in-game AI chat for **StarRupture**. Press **F10**, ask
+a question in your preferred language, and the companion captures the current
+screen and returns concise advice in that same language inside the game.
 
 It is a port of the companion workflow from Project Zomboid to
 [AlienX's StarRupture Mod Loader](https://github.com/AlienXAXS/StarRupture-ModLoader).
@@ -14,9 +14,11 @@ changes inventory, buildings, characters, or saves.
 - Native ImGui chat panel loaded by StarRupture Mod Loader
 - F10 toggle, Enter-to-send, retry, cancel, and confirmed new-chat reset
 - Screenshot-aware answers through the logged-in Claude Code CLI
+- Automatic response-language matching for each player message
 - Six-turn conversational context and persistent `/web on` / `/web off` mode
 - Selective web research with validated StarRupture, Creepy Jar, Steam, GitHub,
   and community-wiki sources
+- Compact source pills that show site names without exposing full URLs
 - Atomic local bridge between the game plugin and the Linux or Windows daemon
 - Automatic DLL updates through the Mod Loader and automatic backend updates
   through the launcher
@@ -119,7 +121,8 @@ screenshot stay local unless research is explicitly requested.
 - “search online” forces research for one question.
 - “answer without web” opts out for one question.
 
-Web-derived answers are shown in the transcript but are not added to later
+Web-derived answers show validated sources as compact site-name pills in the
+transcript; full URLs are not displayed. These answers are not added to later
 conversation context.
 
 ## Architecture
