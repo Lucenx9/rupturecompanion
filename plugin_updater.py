@@ -260,6 +260,7 @@ def _sync_plugin_locked(
 def recover_plugin(
     bridge: Path,
     *,
+    cancel_event: threading.Event | None = None,
     commit_lock: threading.Lock | None = None,
 ) -> None:
     modloader_dir = bridge.parent / "ModLoader"
@@ -267,6 +268,8 @@ def recover_plugin(
     if not plugin_dir.is_dir():
         return
     with _migration_lock(plugin_dir):
+        if cancel_event is not None and cancel_event.is_set():
+            raise PluginUpdateError("plugin migration deferred")
         interface_range = _latest_interface(modloader_dir / "Logs")
         variant = (
             _select_variant(*interface_range) if interface_range is not None else None
@@ -278,6 +281,8 @@ def recover_plugin(
         rollback_dll = plugin_dir / "RuptureCompanion.dll.rollback"
         commit_context = commit_lock if commit_lock is not None else nullcontext()
         with commit_context:
+            if cancel_event is not None and cancel_event.is_set():
+                raise PluginUpdateError("plugin migration deferred")
             _recover_pending_plugin(
                 dll,
                 sidecar,

@@ -42,7 +42,7 @@ def test_launcher_waits_for_daemon_readiness_before_starting_game(
         '  [[ -n "$RC_DAEMON_READY_NONCE" ]] || exit 11\n'
         '  identity="$$|$RC_DAEMON_READY_NONCE"\n'
         '  echo "$identity" > "$RC_BRIDGE_DIR/daemon.lock"\n'
-        "  sleep 0.25\n"
+        "  sleep 10.25\n"
         '  printf migrated > "$MIGRATION_FILE"\n'
         '  echo "$identity" > "$RC_BRIDGE_DIR/daemon.ready"\n'
         "else\n"
@@ -78,7 +78,7 @@ def test_launcher_waits_for_daemon_readiness_before_starting_game(
     result = subprocess.run(
         [str(launcher), str(tmp_path / "fake-game"), "argument with spaces"],
         env=env,
-        timeout=5,
+        timeout=20,
     )
 
     assert result.returncode == 7
@@ -107,7 +107,7 @@ def test_powershell_launcher_waits_for_migration(tmp_path, supports_ready_protoc
         "identity = f'{os.getpid()}|{nonce}' if nonce else str(os.getpid())\n"
         "if nonce:\n"
         "    (bridge / 'daemon.lock').write_text(identity)\n"
-        "time.sleep(0.25)\n"
+        "time.sleep(10.25)\n"
         "Path(os.environ['MIGRATION_FILE']).write_text('migrated')\n"
         "if not nonce:\n"
         "    (bridge / 'daemon.lock').write_text(identity)\n"

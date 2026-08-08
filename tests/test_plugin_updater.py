@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -197,6 +198,32 @@ def test_recover_plugin_restores_pending_rollback_before_migration(tmp_path):
 
     assert dll.read_bytes() == b"MZlegacy"
     assert not rollback.exists()
+
+
+def test_recover_plugin_cancellation_preserves_pending_rollback(tmp_path):
+    bridge = make_modloader_install(tmp_path, "loader supports [60, 60]\n")
+    plugin_dir = bridge.parent / "ModLoader/Plugins"
+    dll = plugin_dir / "RuptureCompanion.dll"
+    sidecar = plugin_dir / "RuptureCompanion.json"
+    rollback = plugin_dir / "RuptureCompanion.dll.rollback"
+    dll.write_bytes(b"MZinterrupted")
+    sidecar.write_text(
+        json.dumps({"manifest_url": plugin_updater.LEGACY_MANIFEST_URL}),
+        encoding="utf-8",
+    )
+    rollback.write_bytes(b"MZlegacy")
+    cancelled = threading.Event()
+    cancelled.set()
+
+    with pytest.raises(plugin_updater.PluginUpdateError, match="deferred"):
+        plugin_updater.recover_plugin(
+            bridge,
+            cancel_event=cancelled,
+            commit_lock=threading.Lock(),
+        )
+
+    assert dll.read_bytes() == b"MZinterrupted"
+    assert rollback.read_bytes() == b"MZlegacy"
 
 
 def test_sync_plugin_rolls_back_dll_when_sidecar_commit_fails(tmp_path, monkeypatch):
@@ -430,6 +457,32 @@ def test_daemon_defers_slow_migration_for_legacy_launcher(tmp_path, monkeypatch)
     assert "mutated" not in events
     assert "lock" in events
     assert "close" in events
+
+
+def test_legacy_launcher_grace_bounds_blocked_recovery(tmp_path, monkeypatch):
+    bridge = tmp_path / "bridge"
+    bridge.mkdir()
+    recovery_cancelled = threading.Event()
+
+    def blocked_recovery(_bridge, *, cancel_event, commit_lock):
+        assert cancel_event.wait(timeout=daemon.LEGACY_MIGRATION_GRACE_SECONDS + 1)
+        with commit_lock:
+            recovery_cancelled.set()
+
+    monkeypatch.setattr(daemon.plugin_updater, "recover_plugin", blocked_recovery)
+    monkeypatch.setattr(
+        daemon.plugin_updater,
+        "sync_plugin",
+        lambda *_args, **_kwargs: pytest.fail("sync started after cancelled recovery"),
+    )
+
+    started = time.monotonic()
+    assert daemon._sync_plugin_for_legacy_launcher(bridge) is None
+    elapsed = time.monotonic() - started
+
+    assert recovery_cancelled.wait(timeout=1)
+    assert daemon.LEGACY_MIGRATION_GRACE_SECONDS == 5.0
+    assert 4.5 <= elapsed < 10
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Bash installer is Linux-only")

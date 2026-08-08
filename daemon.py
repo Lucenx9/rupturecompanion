@@ -292,10 +292,16 @@ def _sync_plugin_for_legacy_launcher(bridge: Path) -> str | None:
     commit_lock = threading.Lock()
     results: list[str | None] = []
     errors: list[Exception] = []
-    plugin_updater.recover_plugin(bridge, commit_lock=commit_lock)
 
     def migrate() -> None:
         try:
+            plugin_updater.recover_plugin(
+                bridge,
+                cancel_event=cancel_event,
+                commit_lock=commit_lock,
+            )
+            if cancel_event.is_set():
+                raise plugin_updater.PluginUpdateError("plugin migration deferred")
             results.append(
                 plugin_updater.sync_plugin(
                     bridge,
