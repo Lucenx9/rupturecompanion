@@ -197,7 +197,7 @@ def handle(
             conversation.web_enabled = requested_web_mode
         try:
             with screenshot.capture_for_analysis() as shot:
-                answer = ai_backend.ask(
+                response = ai_backend.ask(
                     question,
                     str(shot),
                     conversation.history,
@@ -211,9 +211,9 @@ def handle(
                 sequence,
                 session_id,
                 question,
-                answer,
+                response.text,
                 False,
-                not ai_backend.response_used_web(answer),
+                not response.used_web,
             )
         except (screenshot.ScreenshotError, ai_backend.AIError) as error:
             pending = PendingAnswer(

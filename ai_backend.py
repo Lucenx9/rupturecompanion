@@ -4,6 +4,7 @@ import subprocess
 import time
 import unicodedata
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -24,6 +25,8 @@ MAX_SOURCE_URL_CHARS = 2048
 HISTORY_TURNS = 6
 MODEL = "sonnet"
 SOURCE_BLOCK_MARKER = "__RC_SOURCES_V1__"
+SOURCE_PILLS_CAPABILITY = "source-pills-v1"
+SOURCE_PILLS_CONTEXT_PREFIX = "Companion capabilities: "
 
 WEB_MODE_DIRECTIVE = re.compile(r"^\s*/web\s+(on|off)\b", re.IGNORECASE)
 WEB_OPT_OUT_PATTERNS = tuple(
@@ -115,8 +118,15 @@ class RequestCanceled(AIError):
     pass
 
 
-def response_used_web(response: str) -> bool:
-    return f"\n\n{SOURCE_BLOCK_MARKER}\n" in response
+@dataclass(frozen=True)
+class AIResponse:
+    text: str
+    used_web: bool
+
+
+def game_supports_source_pills(game_state: str) -> bool:
+    capability_line = f"{SOURCE_PILLS_CONTEXT_PREFIX}{SOURCE_PILLS_CAPABILITY}"
+    return capability_line in (line.strip() for line in game_state.splitlines())
 
 
 def build_prompt(
@@ -255,7 +265,8 @@ def parse_structured_response(
     *,
     web_tools_enabled: bool,
     web_research_required: bool = False,
-) -> str:
+    source_pills_supported: bool = False,
+) -> AIResponse:
     try:
         envelope: object = json.loads(response)
     except (json.JSONDecodeError, TypeError) as error:
@@ -301,10 +312,12 @@ def parse_structured_response(
         raise AIError("invalid structured output from Claude")
     answer = advice.strip()
     if sources:
-        rendered = [SOURCE_BLOCK_MARKER, sources_heading.strip()]
+        rendered = [sources_heading.strip()]
+        if source_pills_supported:
+            rendered.insert(0, SOURCE_BLOCK_MARKER)
         rendered.extend(label for label, _url in sources)
         answer = f"{answer}\n\n{'\n'.join(rendered)}"
-    return answer
+    return AIResponse(answer, web_used)
 
 
 def _claude_command(tools: str) -> list[str]:
@@ -380,7 +393,7 @@ def ask(
     web_tools_default: bool = True,
     timeout: float | None = None,
     cancel_requested: Callable[[], bool] | None = None,
-) -> str:
+) -> AIResponse:
     started_at = time.monotonic()
     screenshot = Path(screenshot_path).expanduser().resolve()
     preference = explicit_web_preference(question)
@@ -437,6 +450,7 @@ def ask(
             result.stdout.strip(),
             web_tools_enabled=web_enabled,
             web_research_required=web_required,
+            source_pills_supported=game_supports_source_pills(game_state),
         )
     except AIError:
         if not web_enabled or preference is not None:

@@ -137,7 +137,9 @@ Claude can read only the current screenshot. Bash, file editing, and game
 mutation tools are not available. Web sources are restricted by domain and
 validated before they reach the transcript. The backend then appends a versioned
 source-metadata block containing only the localized heading and approved site
-labels; the native plugin consumes that block and renders the labels as pills.
+labels when the native plugin advertises support, and the plugin renders those
+labels as pills. Older plugin versions receive a readable site-name list instead,
+so backend and DLL updates do not need to finish at exactly the same time.
 
 ## Development
 
