@@ -63,6 +63,18 @@ jobs:
             /p:GameSDKRoot="${{ github.workspace }}\game-sdk" `
             /p:PluginSDKInclude="${{ github.workspace }}\plugin-sdk\include" `
             /m /v:minimal
+      - if: github.event_name == 'pull_request'
+        name: Stage current plugin for smoke testing
+        shell: pwsh
+        run: Copy-Item "build\Client Release\Plugins\RuptureCompanion.dll" RuptureCompanion-CI.dll
+      - if: github.event_name == 'pull_request'
+        name: Upload current plugin for smoke testing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: RuptureCompanion-current-${{ github.sha }}
+          path: RuptureCompanion-CI.dll
+          if-no-files-found: error
+          retention-days: 7
       - name: Download legacy v47 interface
         shell: pwsh
         run: |
