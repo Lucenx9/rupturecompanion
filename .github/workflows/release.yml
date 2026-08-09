@@ -227,6 +227,24 @@ jobs:
               echo "Release tag $tag points to $target, expected $GITHUB_SHA" >&2
               exit 1
             fi
+            is_draft="$(
+              gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+                --json isDraft --jq '.isDraft'
+            )"
+            if [[ "$is_draft" == "false" ]]; then
+              published_assets="$(
+                gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+                  --json assets --jq '.assets[].name'
+              )"
+              for name in "${expected[@]}"; do
+                if ! grep -Fqx "$name" <<< "$published_assets"; then
+                  echo "Published release $tag is missing $name" >&2
+                  exit 1
+                fi
+              done
+              echo "Release $tag is already complete; leaving it unchanged."
+              exit 0
+            fi
           else
             gh release create "$tag" \
               --repo "$GITHUB_REPOSITORY" \
