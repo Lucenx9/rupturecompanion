@@ -1,4 +1,5 @@
 import io
+import struct
 import tarfile
 import urllib.error
 from types import SimpleNamespace
@@ -7,17 +8,40 @@ import pytest
 
 import updater
 
-ELF_X86_64_HEADER = b"\x7fELF\x02\x01" + (b"\0" * 12) + b"\x3e\0"
+TRUNCATED_ELF_X86_64 = b"\x7fELF\x02\x01" + (b"\0" * 12) + b"\x3e\0"
 
 
-def write_archive(path, files):
+def valid_elf_x86_64():
+    identity = b"\x7fELF\x02\x01\x01" + (b"\0" * 9)
+    header = struct.pack(
+        "<16sHHIQQQIHHHHHH",
+        identity,
+        3,
+        62,
+        1,
+        0,
+        64,
+        0,
+        0,
+        64,
+        56,
+        1,
+        0,
+        0,
+        0,
+    )
+    load_segment = struct.pack("<IIQQQQQQ", 1, 5, 120, 0, 0, 1, 1, 1)
+    return header + load_segment + b"\0"
+
+
+def write_archive(path, files, helper_mode=0o755):
     with tarfile.open(path, "w:gz") as archive:
         for name, content in files.items():
             encoded = content.encode() if isinstance(content, str) else content
             info = tarfile.TarInfo(name)
             info.size = len(encoded)
             if name == "kwin-screenshot-helper":
-                info.mode = 0o755
+                info.mode = helper_mode
             archive.addfile(info, io.BytesIO(encoded))
 
 
@@ -33,7 +57,7 @@ def test_extract_backend_accepts_complete_release(tmp_path):
             "screenshot.py": "screenshot",
             "updater.py": "updater",
             "daemon-capabilities.json": '{"ready_protocol": 1}',
-            "kwin-screenshot-helper": ELF_X86_64_HEADER,
+            "kwin-screenshot-helper": valid_elf_x86_64(),
             "VERSION": "v0.1.0\n",
         },
     )
@@ -63,7 +87,9 @@ def test_extract_backend_rejects_invalid_kwin_helper(tmp_path):
         updater.extract_backend(archive, tmp_path / "backend")
 
 
-def test_extract_backend_accepts_valid_kwin_helper_without_starting_it(tmp_path):
+def test_extract_backend_accepts_valid_kwin_helper_on_noexec_mount(
+    tmp_path, monkeypatch
+):
     archive = tmp_path / "backend.tar.gz"
     write_archive(
         archive,
@@ -74,14 +100,56 @@ def test_extract_backend_accepts_valid_kwin_helper_without_starting_it(tmp_path)
             "screenshot.py": "screenshot = True",
             "updater.py": "updater = True",
             "daemon-capabilities.json": '{"ready_protocol": 1}',
-            "kwin-screenshot-helper": ELF_X86_64_HEADER,
+            "kwin-screenshot-helper": valid_elf_x86_64(),
             "VERSION": "v0.1.0\n",
         },
     )
+    monkeypatch.setattr(updater.os, "access", lambda *args: False)
     destination = tmp_path / "backend"
     updater.extract_backend(archive, destination)
 
     assert (destination / "kwin-screenshot-helper").is_file()
+
+
+def test_extract_backend_rejects_truncated_kwin_helper(tmp_path):
+    archive = tmp_path / "backend.tar.gz"
+    write_archive(
+        archive,
+        {
+            "daemon.py": "daemon = True",
+            "ai_backend.py": "backend = True",
+            "plugin_updater.py": "plugin_updater = True",
+            "screenshot.py": "screenshot = True",
+            "updater.py": "updater = True",
+            "daemon-capabilities.json": '{"ready_protocol": 1}',
+            "kwin-screenshot-helper": TRUNCATED_ELF_X86_64,
+            "VERSION": "v0.1.0\n",
+        },
+    )
+
+    with pytest.raises(updater.UpdateError, match="invalid KWin screenshot helper"):
+        updater.extract_backend(archive, tmp_path / "backend")
+
+
+def test_extract_backend_rejects_helper_without_executable_archive_mode(tmp_path):
+    archive = tmp_path / "backend.tar.gz"
+    write_archive(
+        archive,
+        {
+            "daemon.py": "daemon = True",
+            "ai_backend.py": "backend = True",
+            "plugin_updater.py": "plugin_updater = True",
+            "screenshot.py": "screenshot = True",
+            "updater.py": "updater = True",
+            "daemon-capabilities.json": '{"ready_protocol": 1}',
+            "kwin-screenshot-helper": valid_elf_x86_64(),
+            "VERSION": "v0.1.0\n",
+        },
+        helper_mode=0o644,
+    )
+
+    with pytest.raises(updater.UpdateError, match="helper is not executable"):
+        updater.extract_backend(archive, tmp_path / "backend")
 
 
 def test_extract_backend_rejects_path_traversal(tmp_path):
@@ -105,7 +173,7 @@ def test_extract_backend_rejects_invalid_python(tmp_path):
             "screenshot.py": "screenshot = True",
             "updater.py": "updater = True",
             "daemon-capabilities.json": '{"ready_protocol": 1}',
-            "kwin-screenshot-helper": ELF_X86_64_HEADER,
+            "kwin-screenshot-helper": valid_elf_x86_64(),
             "VERSION": "v0.1.0\n",
         },
     )
@@ -208,7 +276,7 @@ def test_update_backend_installs_release_and_keeps_rollback(tmp_path, monkeypatc
                 "screenshot.py": "screenshot = True",
                 "updater.py": "updater = True",
                 "daemon-capabilities.json": '{"ready_protocol": 1}',
-                "kwin-screenshot-helper": ELF_X86_64_HEADER,
+                "kwin-screenshot-helper": valid_elf_x86_64(),
                 "VERSION": "v0.2.0\n",
             },
         )

@@ -32,19 +32,40 @@ class UpdateError(Exception):
 
 def _validate_kwin_helper(path: Path) -> None:
     try:
-        with path.open("rb") as stream:
-            header = stream.read(20)
+        data = path.read_bytes()
     except OSError as error:
         raise UpdateError("invalid KWin screenshot helper") from error
+    program_offset = int.from_bytes(data[32:40], "little")
+    program_entry_size = int.from_bytes(data[54:56], "little")
+    program_count = int.from_bytes(data[56:58], "little")
+    program_table_end = program_offset + program_entry_size * program_count
+    has_valid_load_segment = False
+    if program_entry_size == 56 and 0 < program_count <= 128:
+        for index in range(program_count):
+            offset = program_offset + index * program_entry_size
+            segment_type = int.from_bytes(data[offset : offset + 4], "little")
+            file_offset = int.from_bytes(data[offset + 8 : offset + 16], "little")
+            file_size = int.from_bytes(data[offset + 32 : offset + 40], "little")
+            if (
+                segment_type == 1
+                and file_size > 0
+                and file_offset + file_size <= len(data)
+            ):
+                has_valid_load_segment = True
+                break
     is_x86_64_elf = (
-        len(header) == 20
-        and header[:6] == b"\x7fELF\x02\x01"
-        and int.from_bytes(header[18:20], "little") == 62
+        len(data) >= 64
+        and data[:7] == b"\x7fELF\x02\x01\x01"
+        and int.from_bytes(data[16:18], "little") in (2, 3)
+        and int.from_bytes(data[18:20], "little") == 62
+        and int.from_bytes(data[20:24], "little") == 1
+        and int.from_bytes(data[52:54], "little") == 64
+        and program_offset >= 64
+        and program_table_end <= len(data)
+        and has_valid_load_segment
     )
     if not is_x86_64_elf:
         raise UpdateError("invalid KWin screenshot helper")
-    if os.name != "nt" and not os.access(path, os.X_OK):
-        raise UpdateError("KWin screenshot helper is not executable")
 
 
 def extract_backend(archive_path: Path, destination: Path) -> None:
@@ -67,6 +88,11 @@ def extract_backend(archive_path: Path, destination: Path) -> None:
                     or not (member.isfile() or member.isdir())
                 ):
                     raise UpdateError(f"unsafe archive entry: {member.name}")
+                if (
+                    member_path == PurePosixPath("kwin-screenshot-helper")
+                    and member.mode & 0o111 == 0
+                ):
+                    raise UpdateError("KWin screenshot helper is not executable")
             if total_size > MAX_EXTRACTED_BYTES:
                 raise UpdateError("backend archive is too large")
             archive.extractall(destination, filter="data")
