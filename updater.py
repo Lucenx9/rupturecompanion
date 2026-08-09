@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -45,6 +46,22 @@ def _validate_kwin_helper(path: Path) -> None:
         raise UpdateError("invalid KWin screenshot helper")
     if os.name != "nt" and not os.access(path, os.X_OK):
         raise UpdateError("KWin screenshot helper is not executable")
+    if os.name != "nt":
+        environment = os.environ.copy()
+        for variable in ("QT_QPA_PLATFORM", "LD_LIBRARY_PATH", "LD_PRELOAD"):
+            environment.pop(variable, None)
+        try:
+            probe = subprocess.run(
+                [path.resolve()],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                env=environment,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise UpdateError("KWin screenshot helper cannot start") from error
+        if probe.returncode != 2 or "usage:" not in probe.stderr:
+            raise UpdateError("KWin screenshot helper cannot start")
 
 
 def extract_backend(archive_path: Path, destination: Path) -> None:

@@ -1,4 +1,5 @@
 import io
+import os
 import tarfile
 import urllib.error
 from types import SimpleNamespace
@@ -8,6 +9,18 @@ import pytest
 import updater
 
 ELF_X86_64_HEADER = b"\x7fELF\x02\x01" + (b"\0" * 12) + b"\x3e\0"
+
+
+def allow_helper_probe(monkeypatch):
+    if os.name != "nt":
+        monkeypatch.setattr(
+            updater.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=2,
+                stderr="usage: kwin-screenshot-helper OUTPUT_RAW TIMEOUT_MS\n",
+            ),
+        )
 
 
 def write_archive(path, files):
@@ -21,7 +34,8 @@ def write_archive(path, files):
             archive.addfile(info, io.BytesIO(encoded))
 
 
-def test_extract_backend_accepts_complete_release(tmp_path):
+def test_extract_backend_accepts_complete_release(tmp_path, monkeypatch):
+    allow_helper_probe(monkeypatch)
     archive = tmp_path / "backend.tar.gz"
     destination = tmp_path / "backend"
     write_archive(
@@ -63,6 +77,33 @@ def test_extract_backend_rejects_invalid_kwin_helper(tmp_path):
         updater.extract_backend(archive, tmp_path / "backend")
 
 
+def test_extract_backend_rejects_kwin_helper_that_cannot_start(tmp_path, monkeypatch):
+    if os.name == "nt":
+        pytest.skip("Windows does not execute the Linux helper")
+    archive = tmp_path / "backend.tar.gz"
+    write_archive(
+        archive,
+        {
+            "daemon.py": "daemon = True",
+            "ai_backend.py": "backend = True",
+            "plugin_updater.py": "plugin_updater = True",
+            "screenshot.py": "screenshot = True",
+            "updater.py": "updater = True",
+            "daemon-capabilities.json": '{"ready_protocol": 1}',
+            "kwin-screenshot-helper": ELF_X86_64_HEADER,
+            "VERSION": "v0.1.0\n",
+        },
+    )
+    monkeypatch.setattr(
+        updater.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="loader error"),
+    )
+
+    with pytest.raises(updater.UpdateError, match="helper cannot start"):
+        updater.extract_backend(archive, tmp_path / "backend")
+
+
 def test_extract_backend_rejects_path_traversal(tmp_path):
     archive = tmp_path / "backend.tar.gz"
     write_archive(archive, {"../escaped": "bad"})
@@ -73,7 +114,8 @@ def test_extract_backend_rejects_path_traversal(tmp_path):
     assert not (tmp_path / "escaped").exists()
 
 
-def test_extract_backend_rejects_invalid_python(tmp_path):
+def test_extract_backend_rejects_invalid_python(tmp_path, monkeypatch):
+    allow_helper_probe(monkeypatch)
     archive = tmp_path / "backend.tar.gz"
     write_archive(
         archive,
@@ -172,6 +214,7 @@ def test_download_rejects_an_oversized_release(tmp_path, monkeypatch):
 
 
 def test_update_backend_installs_release_and_keeps_rollback(tmp_path, monkeypatch):
+    allow_helper_probe(monkeypatch)
     installed = tmp_path / "backend"
     installed.mkdir()
     (installed / "VERSION").write_text("v0.1.0\n", encoding="utf-8")
