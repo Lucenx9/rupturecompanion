@@ -15,28 +15,65 @@ function Find-StarRupture {
     }
 
     $steamRoots = [System.Collections.Generic.List[string]]::new()
-    try {
-        $steamPath = (Get-ItemProperty "HKCU:\Software\Valve\Steam").SteamPath
-        if ($steamPath) { $steamRoots.Add($steamPath) }
-    } catch {
+    $seenRoots = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    if ($env:RC_STEAM_ROOT -and $seenRoots.Add($env:RC_STEAM_ROOT)) {
+        $steamRoots.Add($env:RC_STEAM_ROOT)
     }
-    $defaultSteam = Join-Path ${env:ProgramFiles(x86)} "Steam"
-    if (Test-Path -LiteralPath $defaultSteam) { $steamRoots.Add($defaultSteam) }
+    foreach ($registryPath in
+        "HKCU:\Software\Valve\Steam",
+        "HKLM:\Software\WOW6432Node\Valve\Steam",
+        "HKLM:\Software\Valve\Steam") {
+        try {
+            $properties = Get-ItemProperty $registryPath
+            $steamPath = $properties.SteamPath
+            if (-not $steamPath) { $steamPath = $properties.InstallPath }
+            if ($steamPath -and $seenRoots.Add($steamPath)) {
+                $steamRoots.Add($steamPath)
+            }
+        } catch {
+        }
+    }
+    if (${env:ProgramFiles(x86)}) {
+        $defaultSteam = Join-Path ${env:ProgramFiles(x86)} "Steam"
+        if ((Test-Path -LiteralPath $defaultSteam) -and
+            $seenRoots.Add($defaultSteam)) {
+            $steamRoots.Add($defaultSteam)
+        }
+    }
 
     foreach ($steamRoot in $steamRoots) {
         $libraries = [System.Collections.Generic.List[string]]::new()
-        $libraries.Add($steamRoot)
+        $seenLibraries = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+        if ($seenLibraries.Add($steamRoot)) { $libraries.Add($steamRoot) }
         $vdf = Join-Path $steamRoot "steamapps\libraryfolders.vdf"
         if (Test-Path -LiteralPath $vdf) {
             $vdfText = [System.IO.File]::ReadAllText($vdf)
             foreach ($match in [regex]::Matches($vdfText, '"path"\s+"([^"]+)"')) {
-                $libraries.Add($match.Groups[1].Value.Replace("\\", "\"))
+                $library = $match.Groups[1].Value.Replace("\\", "\")
+                if ($seenLibraries.Add($library)) { $libraries.Add($library) }
             }
         }
         foreach ($library in $libraries) {
             $manifest = Join-Path $library "steamapps\appmanifest_1631270.acf"
+            $installDir = "StarRupture"
             if (Test-Path -LiteralPath $manifest) {
-                return Join-Path $library "steamapps\common\StarRupture"
+                $manifestText = [System.IO.File]::ReadAllText($manifest)
+                $installMatch = [regex]::Match(
+                    $manifestText, '"installdir"\s+"([^"]+)"'
+                )
+                if ($installMatch.Success) {
+                    $installDir = $installMatch.Groups[1].Value
+                }
+            }
+            $candidate = Join-Path $library "steamapps\common\$installDir"
+            $candidateExe = Join-Path $candidate `
+                "StarRupture\Binaries\Win64\StarRuptureGameSteam-Win64-Shipping.exe"
+            if (Test-Path -LiteralPath $candidateExe) {
+                return [System.IO.Path]::GetFullPath($candidate)
             }
         }
     }
@@ -167,6 +204,18 @@ try {
         throw
     }
     Remove-Item -LiteralPath $RollbackDll -Force -ErrorAction SilentlyContinue
+    $ObsoleteRemoved = 0
+    foreach ($ObsoleteName in
+        "RuptureCompanion-Client.dll",
+        "RuptureCompanion-Client.json",
+        "RuptureCompanion-Legacy.dll",
+        "RuptureCompanion-Legacy.json") {
+        $ObsoletePath = Join-Path $PluginDir $ObsoleteName
+        if (Test-Path -LiteralPath $ObsoletePath) {
+            Remove-Item -LiteralPath $ObsoletePath -Force
+            $ObsoleteRemoved++
+        }
+    }
     New-Item -ItemType Directory -Force `
         -Path (Join-Path $BinaryDir "RuptureCompanion") | Out-Null
 
@@ -198,6 +247,9 @@ try {
 
 $Launcher = Join-Path $PSScriptRoot "run-with-companion.cmd"
 Write-Host "Installed RuptureCompanion.dll ($Variant) in $PluginDir"
+if ($ObsoleteRemoved -gt 0) {
+    Write-Host "Removed $ObsoleteRemoved obsolete duplicate plugin file(s)."
+}
 Write-Host $AutoUpdateStatus
 Write-Host "Use this Steam launch option:"
 Write-Host ('"{0}" %command%' -f $Launcher)

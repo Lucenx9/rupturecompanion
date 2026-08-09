@@ -2,12 +2,76 @@
 # Install the release matching the interface exposed by the local Mod Loader.
 set -euo pipefail
 
-default_game_root="/mnt/storage/SteamLibrary/steamapps/common/StarRupture"
-game_root="${RC_GAME_DIR:-${1:-$default_game_root}}"
 installer_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 installer_python="$installer_dir/.venv/bin/python"
 if [[ ! -x "$installer_python" ]]; then
     installer_python="$(command -v python3 || true)"
+fi
+
+find_star_rupture() {
+    local requested_root="${1:-}"
+    local steam_root=""
+    local library=""
+    local manifest=""
+    local install_dir=""
+    local candidate=""
+    local vdf=""
+    local -a steam_roots=()
+    local -a libraries=()
+
+    if [[ -n "$requested_root" ]]; then
+        realpath -m -- "$requested_root"
+        return
+    fi
+
+    [[ -n "${RC_STEAM_ROOT:-}" ]] && steam_roots+=("$RC_STEAM_ROOT")
+    [[ -n "${STEAM_DIR:-}" ]] && steam_roots+=("$STEAM_DIR")
+    steam_roots+=(
+        "$HOME/.local/share/Steam"
+        "$HOME/.steam/steam"
+        "$HOME/.steam/root"
+        "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+        "/mnt/storage/SteamLibrary"
+    )
+
+    for steam_root in "${steam_roots[@]}"; do
+        [[ -d "$steam_root" ]] || continue
+        libraries=("$steam_root")
+        vdf="$steam_root/steamapps/libraryfolders.vdf"
+        if [[ -f "$vdf" ]]; then
+            while IFS= read -r library; do
+                library="${library//\\\\/\\}"
+                [[ -n "$library" ]] && libraries+=("$library")
+            done < <(sed -nE \
+                -e 's/^[[:space:]]*"path"[[:space:]]+"([^"]+)".*/\1/p' \
+                -e 's/^[[:space:]]*"[0-9]+"[[:space:]]+"([^"]+)".*/\1/p' \
+                "$vdf")
+        fi
+
+        for library in "${libraries[@]}"; do
+            manifest="$library/steamapps/appmanifest_1631270.acf"
+            install_dir="StarRupture"
+            if [[ -f "$manifest" ]]; then
+                install_dir="$(sed -nE \
+                    's/.*"installdir"[[:space:]]+"([^"]+)".*/\1/p' \
+                    "$manifest" | tail -1)"
+                [[ -n "$install_dir" ]] || install_dir="StarRupture"
+            fi
+            candidate="$library/steamapps/common/$install_dir"
+            if [[ -f "$candidate/StarRupture/Binaries/Win64/StarRuptureGameSteam-Win64-Shipping.exe" ]]; then
+                realpath -m -- "$candidate"
+                return
+            fi
+        done
+    done
+    return 1
+}
+
+requested_game_root="${RC_GAME_DIR:-${1:-}}"
+if ! game_root="$(find_star_rupture "$requested_game_root")"; then
+    echo "StarRupture was not found in the registered Steam libraries." >&2
+    echo "Usage: $0 [StarRupture installation directory]" >&2
+    exit 1
 fi
 binary_dir="$game_root/StarRupture/Binaries/Win64"
 plugin_dir="$binary_dir/ModLoader/Plugins"
@@ -129,6 +193,16 @@ if ! mv -f -- "$staged_sidecar" "$installed_sidecar"; then
     exit 1
 fi
 rm -f -- "$rollback_dll"
+obsolete_removed=0
+for obsolete_name in \
+        RuptureCompanion-Client.dll RuptureCompanion-Client.json \
+        RuptureCompanion-Legacy.dll RuptureCompanion-Legacy.json; do
+    obsolete_path="$plugin_dir/$obsolete_name"
+    if [[ -e "$obsolete_path" ]]; then
+        rm -f -- "$obsolete_path"
+        ((obsolete_removed += 1))
+    fi
+done
 mkdir -p "$binary_dir/RuptureCompanion"
 
 auto_update_status="Mod Loader plugin auto-update was left unchanged."
@@ -149,6 +223,9 @@ fi
 
 launcher="$(realpath "$installer_dir/run-with-companion.sh")"
 echo "Installed RuptureCompanion.dll ($variant) in $plugin_dir"
+if (( obsolete_removed > 0 )); then
+    echo "Removed $obsolete_removed obsolete duplicate plugin file(s)."
+fi
 echo "$auto_update_status"
 echo "Use this Steam launch option:"
 echo "WINEDLLOVERRIDES=\"dwmapi=n,b\" $launcher %command%"

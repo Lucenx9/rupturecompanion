@@ -55,8 +55,9 @@ cd rupturecompanion
 uv sync --group dev
 ```
 
-Install the plugin. The default matches the local Steam installation; pass a
-different StarRupture directory as the first argument when needed.
+Install the plugin. It searches Steam's registered libraries, including
+libraries on secondary SSDs. Pass a StarRupture directory explicitly only when
+the library is not registered with Steam.
 
 ```bash
 ./install-plugin.sh
@@ -91,8 +92,9 @@ uv sync --group dev
 powershell -ExecutionPolicy Bypass -File .\install-plugin.ps1
 ```
 
-The installer discovers the Steam library and compatible loader interface. If
-the game is in a nonstandard location, pass it explicitly:
+The installer discovers all Steam libraries registered in `libraryfolders.vdf`,
+including libraries on secondary SSDs, and selects the compatible loader
+interface. If the game is in an unregistered location, pass it explicitly:
 
 ```powershell
 .\install-plugin.ps1 -GameRoot "D:\SteamLibrary\steamapps\common\StarRupture"
@@ -101,6 +103,12 @@ the game is in a nonstandard location, pass it explicitly:
 Copy the Steam launch option printed by the installer. It uses
 `run-with-companion.cmd`, so no Proton override is needed on Windows. Launch the
 game and press **F10**.
+
+Both installers atomically replace an existing `RuptureCompanion.dll` and its
+update manifest. After a successful install they remove obsolete duplicate
+`RuptureCompanion-Client.*` and `RuptureCompanion-Legacy.*` files, while keeping
+the companion configuration, chat bridge, and other mods untouched. Close the
+game before running an installer.
 
 ## Updates
 
