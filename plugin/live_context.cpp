@@ -1652,6 +1652,7 @@ void OnWorldBeginPlay(SDK::UWorld* world)
 {
     RecordGameThread(nullptr);
     g_world = world;
+    g_loggedSuccessfulSample = false;
     g_nextSampleAt = SteadyClock::now();
     StoreSnapshot(BuildUnavailableSnapshot("waiting_for_local_player"));
 }
