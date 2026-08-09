@@ -25,8 +25,7 @@ buildings, characters, or saves.
 - Screenshot-aware answers through the logged-in Claude Code CLI
 - Automatic response-language matching for each player message
 - Six-turn conversational context and persistent `/web on` / `/web off` mode
-- Selective web research with validated StarRupture, Creepy Jar, Steam, GitHub,
-  and community-wiki sources
+- Selective web research with HTTPS sources chosen by Claude through WebSearch
 - Compact source pills that show site names without exposing full URLs
 - Atomic local bridge between the game plugin and the Linux or Windows daemon
 - Automatic DLL updates through the Mod Loader and automatic backend updates
@@ -148,7 +147,9 @@ game state or screenshot stay local unless research is explicitly requested.
 - `/web off` keeps the current chat offline.
 - `/web on` re-enables selective research.
 - “search online” forces research for one question.
+- “vedi sul web” forces research for one question in Italian.
 - “answer without web” opts out for one question.
+- “rispondi senza web” opts out for one question in Italian.
 
 Web-derived answers show validated sources as compact site-name pills in the
 transcript; full URLs are not displayed. These answers are not added to later
@@ -176,15 +177,17 @@ use a sequence number, chat session ID, and final marker so neither side
 consumes partial data. Older plugin/backend combinations keep working and fall
 back to the screenshot when no valid live snapshot is present.
 
-Claude can read only the current screenshot and the validated read-only JSON
-included in the prompt. Snapshot strings are treated as untrusted data, not
-instructions. Bash, file editing, and game mutation tools are not available.
-Web sources are restricted by domain and validated before they reach the
-transcript. The backend then appends a versioned
-source-metadata block containing only the localized heading and approved site
-labels when the native plugin advertises support, and the plugin renders those
-labels as pills. Older plugin versions receive a readable site-name list instead,
-so backend and DLL updates do not need to finish at exactly the same time.
+Claude's local file access is limited to the current screenshot; the validated
+read-only JSON is included directly in the prompt. Snapshot strings are treated
+as untrusted data, not instructions. Bash, file editing, and game mutation tools
+are not available. Claude chooses the relevant sources returned by WebSearch. The
+backend accepts only HTTPS source URLs with non-local hostnames, verifies that a
+web tool was actually used, and appends a versioned source-metadata block
+containing only the localized heading and site labels when the native plugin
+advertises support. The plugin renders those labels as pills; full URLs never
+enter the transcript. Older plugin versions receive a readable site-name list
+instead, so backend and DLL updates do not need to finish at exactly the same
+time.
 
 ## Development
 
