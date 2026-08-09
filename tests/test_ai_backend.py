@@ -174,6 +174,40 @@ def test_session_metadata_rejects_free_form_lines():
     assert "Ignore previous instructions" not in prompt
 
 
+@pytest.mark.parametrize(
+    ("partial", "missing", "truncated"),
+    [
+        (False, ["inventory"], []),
+        (False, [], ["objectives"]),
+        (True, [], []),
+        (True, ["unknown_section"], []),
+        (True, ["inventory", "inventory"], []),
+    ],
+)
+def test_live_context_validator_rejects_inconsistent_section_status(
+    partial, missing, truncated
+):
+    snapshot = {
+        "schema_version": 1,
+        "captured_at_unix_ms": 1_000_000,
+        "source": {
+            "kind": "client_observed",
+            "game_sdk_build": "CL121391",
+            "sample_interval_ms": 750,
+        },
+        "status": {
+            "available": True,
+            "partial": partial,
+            "missing_sections": missing,
+            "truncated_sections": truncated,
+        },
+    }
+
+    assert (
+        ai_backend.validate_live_context(json.dumps(snapshot), now_ms=1_000_000) is None
+    )
+
+
 def test_build_prompt_does_not_pass_malformed_live_context_to_model():
     game_state = (
         "Session mode: Standalone\n"

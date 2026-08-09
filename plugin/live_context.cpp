@@ -49,7 +49,7 @@ constexpr auto SampleInterval = std::chrono::milliseconds(750);
 constexpr auto WorldProbeInterval = std::chrono::seconds(2);
 constexpr int MaxInventorySlots = 256;
 constexpr int MaxInventoryItems = 128;
-constexpr int MaxNearbyPlayers = 8;
+constexpr int MaxReplicatedPlayers = 8;
 constexpr int MaxObjectives = 32;
 constexpr int MaxSubObjectives = 64;
 constexpr int MaxInteractedItems = 32;
@@ -831,6 +831,10 @@ std::string BuildProgression(
         }
         Add(fields, "skills", JsonArray(skills));
     }
+    else
+    {
+        Add(fields, "skills", "null");
+    }
 
     SDK::ACrCorporationsOwner* corporations = gameState->CorporationsOwner;
     if (corporations != nullptr)
@@ -879,6 +883,10 @@ std::string BuildProgression(
         }
         Add(fields, "corporations", JsonArray(corporationEntries));
     }
+    else
+    {
+        Add(fields, "corporations", "null");
+    }
 
     SDK::ACrTechnologyKeeper* technology = gameState->TechnologyKeeper;
     if (technology != nullptr)
@@ -894,7 +902,26 @@ std::string BuildProgression(
                 TechnologyNames(technology->AllRecipes, truncated)));
         Add(fields, "technology", JsonObject(technologyFields));
     }
+    else
+    {
+        Add(fields, "technology", "null");
+    }
 
+    std::vector<std::string> missingSubsections;
+    if (controller == nullptr)
+    {
+        missingSubsections.push_back(JsonString("skills"));
+    }
+    if (corporations == nullptr)
+    {
+        missingSubsections.push_back(JsonString("corporations"));
+    }
+    if (technology == nullptr)
+    {
+        missingSubsections.push_back(JsonString("technology"));
+    }
+    Add(fields, "partial", JsonBoolean(!missingSubsections.empty()));
+    Add(fields, "missing_subsections", JsonArray(missingSubsections));
     Add(fields, "truncated", JsonBoolean(truncated));
     return JsonObject(fields);
 }
@@ -919,12 +946,12 @@ std::string BuildSession(
     Add(fields, "cutscene_active", JsonBoolean(gameState->IsCutsceneActive()));
     AddNumber(fields, "server_world_time_seconds", gameState->GetServerWorldTimeSeconds());
 
-    struct NearbyPlayer
+    struct ReplicatedPlayer
     {
         double distanceMeters;
         SDK::ACrPlayerStateBase* state;
     };
-    std::vector<NearbyPlayer> nearby;
+    std::vector<ReplicatedPlayer> replicatedPlayers;
     const int playerCount = std::clamp(gameState->PlayerArray.Num(), 0, 64);
     truncated = gameState->PlayerArray.Num() > 64;
     const SDK::FVector localPosition = localPlayer->K2_GetActorLocation();
@@ -945,29 +972,29 @@ std::string BuildSession(
         {
             continue;
         }
-        nearby.push_back({
+        replicatedPlayers.push_back({
             localPosition.GetDistanceToInMeters(state->CrChar->K2_GetActorLocation()),
             state});
     }
-    std::ranges::sort(nearby, {}, &NearbyPlayer::distanceMeters);
-    if (nearby.size() > MaxNearbyPlayers)
+    std::ranges::sort(replicatedPlayers, {}, &ReplicatedPlayer::distanceMeters);
+    if (replicatedPlayers.size() > MaxReplicatedPlayers)
     {
-        nearby.resize(MaxNearbyPlayers);
+        replicatedPlayers.resize(MaxReplicatedPlayers);
         truncated = true;
     }
-    std::vector<std::string> nearbyEntries;
-    nearbyEntries.reserve(nearby.size());
-    for (const NearbyPlayer& entry : nearby)
+    std::vector<std::string> replicatedEntries;
+    replicatedEntries.reserve(replicatedPlayers.size());
+    for (const ReplicatedPlayer& entry : replicatedPlayers)
     {
-        Fields nearbyFields;
-        AddNumber(nearbyFields, "distance_m", entry.distanceMeters);
-        Add(nearbyFields, "profession", JsonString(ProfessionName(entry.state->Profession)));
-        Add(nearbyFields, "dead", JsonBoolean(entry.state->bDead));
-        Add(nearbyFields, "incapacitated", JsonBoolean(entry.state->bIncapacitated));
-        nearbyEntries.push_back(JsonObject(nearbyFields));
+        Fields replicatedFields;
+        AddNumber(replicatedFields, "distance_m", entry.distanceMeters);
+        Add(replicatedFields, "profession", JsonString(ProfessionName(entry.state->Profession)));
+        Add(replicatedFields, "dead", JsonBoolean(entry.state->bDead));
+        Add(replicatedFields, "incapacitated", JsonBoolean(entry.state->bIncapacitated));
+        replicatedEntries.push_back(JsonObject(replicatedFields));
     }
-    Add(fields, "nearby_players", JsonArray(nearbyEntries));
-    Add(fields, "nearby_players_truncated", JsonBoolean(truncated));
+    Add(fields, "closest_replicated_players", JsonArray(replicatedEntries));
+    Add(fields, "replicated_players_truncated", JsonBoolean(truncated));
     return JsonObject(fields);
 }
 

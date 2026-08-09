@@ -52,6 +52,20 @@ LIVE_CONTEXT_KEYS = frozenset(
         "freshness",
     }
 )
+LIVE_CONTEXT_SECTION_NAMES = frozenset(
+    {
+        "player",
+        "inventory",
+        "gems",
+        "equipment",
+        "session",
+        "progression",
+        "objectives",
+        "environment",
+        "target",
+        "base",
+    }
+)
 SESSION_MODES = frozenset(
     {
         "Unknown",
@@ -185,13 +199,15 @@ def _json_object_without_duplicate_keys(
     return result
 
 
-def _valid_string_list(value: object) -> bool:
+def _valid_section_list(value: object) -> bool:
     return (
         isinstance(value, list)
         and len(value) <= 32
         and all(
-            isinstance(item, str) and len(item.encode("utf-8")) <= 64 for item in value
+            isinstance(item, str) and item in LIVE_CONTEXT_SECTION_NAMES
+            for item in value
         )
+        and len(value) == len(set(value))
     )
 
 
@@ -244,6 +260,12 @@ def validate_live_context(
     captured_at = snapshot.get("captured_at_unix_ms")
     status = snapshot.get("status")
     source = snapshot.get("source")
+    missing_sections = (
+        status.get("missing_sections") if isinstance(status, dict) else None
+    )
+    truncated_sections = (
+        status.get("truncated_sections") if isinstance(status, dict) else None
+    )
     sections = (
         snapshot.get(key)
         for key in (
@@ -279,8 +301,9 @@ def validate_live_context(
         }
         or not isinstance(status.get("available"), bool)
         or not isinstance(status.get("partial"), bool)
-        or not _valid_string_list(status.get("missing_sections"))
-        or not _valid_string_list(status.get("truncated_sections"))
+        or not _valid_section_list(missing_sections)
+        or not _valid_section_list(truncated_sections)
+        or status.get("partial") != bool(missing_sections or truncated_sections)
         or any(
             section is not None and not isinstance(section, dict)
             for section in sections

@@ -9,7 +9,7 @@ It is a port of the companion workflow from Project Zomboid to
 [AlienX's StarRupture Mod Loader](https://github.com/AlienXAXS/StarRupture-ModLoader).
 The plugin is read-only: it observes player state, inventory, gems, equipment,
 skills and research progression, objectives, the current target or machine,
-environmental waves, map/base alerts, nearby replicated players, multiplayer
+environmental waves, map/base alerts, the closest replicated players, multiplayer
 session state, the screenshot, and session type. It never changes inventory,
 buildings, characters, or saves.
 
@@ -19,7 +19,8 @@ buildings, characters, or saves.
 - F10 toggle, Enter-to-send, retry, cancel, and confirmed new-chat reset
 - Live player vitals, inventory, gems, equipment, skills, corporations, unlocks,
   available technology, objectives, target machine status, power/crafting data,
-  environmental waves, map/base alerts, nearby players, and multiplayer session
+  environmental waves, map/base alerts, up to eight closest replicated players
+  (with distance), and multiplayer session
   state
 - Screenshot-aware answers through the logged-in Claude Code CLI
 - Automatic response-language matching for each player message
