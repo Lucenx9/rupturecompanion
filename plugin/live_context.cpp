@@ -54,8 +54,13 @@ constexpr int MaxObjectives = 32;
 constexpr int MaxSubObjectives = 64;
 constexpr int MaxInteractedItems = 32;
 constexpr int MaxTechnologyEntries = 64;
+constexpr int MaxTextCodeUnits = 4096;
 constexpr std::size_t MaxStringBytes = 128;
 constexpr std::size_t MaxSnapshotBytes = 48 * 1024;
+
+using ConvertTextToStringFunction =
+    SDK::FString*(__fastcall*)(SDK::FString*, const SDK::FText*);
+using FreeEngineMemoryFunction = void (*)(void*);
 
 IPluginSelf* g_self = nullptr;
 SDK::UWorld* g_world = nullptr;
@@ -68,6 +73,9 @@ std::atomic<DWORD> g_gameThreadId{0};
 std::atomic<DWORD> g_registrationThreadId{0};
 std::atomic_bool g_registeredDuringStartup{false};
 HANDLE g_cleanupEvent = nullptr;
+ConvertTextToStringFunction g_convertTextToString = nullptr;
+FreeEngineMemoryFunction g_freeEngineMemory = nullptr;
+bool g_loggedSuccessfulSample = false;
 
 BOOL CALLBACK FindWindowOwnedByCurrentThread(HWND window, LPARAM context)
 {
@@ -320,7 +328,34 @@ std::int64_t UnixTimeMilliseconds()
 
 std::string SafeText(const SDK::FText& text)
 {
-    return text.TextData == nullptr ? std::string{} : TruncateUtf8(text.ToString());
+    if (text.TextData == nullptr || g_convertTextToString == nullptr
+        || g_freeEngineMemory == nullptr)
+    {
+        return {};
+    }
+
+    SDK::FString converted;
+    g_convertTextToString(&converted, &text);
+    const wchar_t* data = converted.GetDataPtr();
+    struct EngineStringBuffer
+    {
+        const wchar_t* data;
+        ~EngineStringBuffer()
+        {
+            if (data != nullptr)
+            {
+                g_freeEngineMemory(const_cast<wchar_t*>(data));
+            }
+        }
+    } buffer{data};
+
+    const int length = converted.Num();
+    if (data == nullptr || length <= 1 || converted.Max() < length
+        || length > MaxTextCodeUnits)
+    {
+        return {};
+    }
+    return TruncateUtf8(converted.ToString());
 }
 
 std::string ItemName(const SDK::UAuItemDataBase* item)
@@ -1651,7 +1686,17 @@ void OnEngineTick(const float)
     g_nextSampleAt = now + SampleInterval;
     try
     {
-        StoreSnapshot(Capture(g_world));
+        std::string snapshot = Capture(g_world);
+        const bool available =
+            snapshot.find("\"available\":true") != std::string::npos;
+        StoreSnapshot(std::move(snapshot));
+        if (available && !g_loggedSuccessfulSample && g_self != nullptr
+            && g_self->logger != nullptr)
+        {
+            g_loggedSuccessfulSample = true;
+            g_self->logger->Info(
+                g_self, "%s", "Live game-state sample captured");
+        }
     }
     catch (...)
     {
@@ -1697,13 +1742,31 @@ bool Initialize(IPluginSelf* self)
     }
     if (self == nullptr || self->hooks == nullptr || self->hooks->Engine == nullptr
         || self->hooks->Engine->PostToGameThread == nullptr
-        || self->hooks->World == nullptr)
+        || self->hooks->World == nullptr || self->hooks->Text == nullptr
+        || self->hooks->Text->Conv_TextToString == nullptr
+        || self->hooks->Memory == nullptr || self->hooks->Memory->Free == nullptr
+        || self->hooks->Memory->IsAllocatorAvailable == nullptr
+        || !self->hooks->Memory->IsAllocatorAvailable())
     {
         return false;
     }
+    const uintptr_t convertTextAddress =
+        self->hooks->Text->Conv_TextToString();
+    if (convertTextAddress == 0)
+    {
+        return false;
+    }
+    static_assert(
+        sizeof(convertTextAddress) == sizeof(ConvertTextToStringFunction));
+    g_convertTextToString =
+        std::bit_cast<ConvertTextToStringFunction>(convertTextAddress);
+    g_freeEngineMemory = self->hooks->Memory->Free;
+    g_loggedSuccessfulSample = false;
     g_cleanupEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (g_cleanupEvent == nullptr)
     {
+        g_convertTextToString = nullptr;
+        g_freeEngineMemory = nullptr;
         return false;
     }
     g_registrationThreadId.store(
@@ -1759,6 +1822,9 @@ void Shutdown()
     g_gameThreadId.store(0, std::memory_order_release);
     g_registrationThreadId.store(0, std::memory_order_release);
     g_registeredDuringStartup.store(false, std::memory_order_release);
+    g_convertTextToString = nullptr;
+    g_freeEngineMemory = nullptr;
+    g_loggedSuccessfulSample = false;
     if (g_cleanupEvent != nullptr)
     {
         CloseHandle(g_cleanupEvent);
