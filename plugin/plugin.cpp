@@ -668,7 +668,7 @@ void RenderPanel(IModLoaderImGui* ui)
         }
         ui->Separator();
 
-        if (ui->BeginChild("##Transcript", 0.0f, -108.0f, true))
+        if (ui->BeginChild("##Transcript", 0.0f, -80.0f, true))
         {
             for (std::size_t messageIndex = 0; messageIndex < messages.size(); ++messageIndex)
             {
