@@ -65,23 +65,61 @@ std::mutex g_snapshotMutex;
 std::string g_snapshot;
 bool g_registered = false;
 std::atomic<DWORD> g_gameThreadId{0};
+std::atomic<DWORD> g_registrationThreadId{0};
+std::atomic_bool g_registeredDuringStartup{false};
 HANDLE g_cleanupEvent = nullptr;
+
+BOOL CALLBACK FindWindowOwnedByCurrentThread(HWND window, LPARAM context)
+{
+    auto* found = reinterpret_cast<bool*>(context);
+    DWORD processId = 0;
+    const DWORD windowThreadId = GetWindowThreadProcessId(window, &processId);
+    wchar_t className[64]{};
+    GetClassNameW(window, className, static_cast<int>(std::size(className)));
+    if (processId == GetCurrentProcessId()
+        && windowThreadId == GetCurrentThreadId()
+        && IsWindowVisible(window) && GetWindow(window, GW_OWNER) == nullptr)
+    {
+        // The startup worker owns the Mod Loader splash, not the game window.
+        if (lstrcmpW(className, L"StarRuptureModLoaderSplash") == 0)
+        {
+            return TRUE;
+        }
+        *found = true;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+bool CurrentThreadOwnsProcessWindow()
+{
+    bool found = false;
+    EnumWindows(&FindWindowOwnedByCurrentThread,
+        reinterpret_cast<LPARAM>(&found));
+    return found;
+}
 
 bool CompatibleGameBuild()
 {
-    wchar_t executablePath[MAX_PATH]{};
-    if (GetModuleFileNameW(nullptr, executablePath, MAX_PATH) == 0)
+    // Extended-length Win32 paths can be much longer than MAX_PATH. A return
+    // value equal to the buffer capacity means GetModuleFileNameW truncated it.
+    constexpr DWORD MaxExtendedPath = 32768;
+    std::vector<wchar_t> executablePath(MaxExtendedPath);
+    const DWORD executablePathLength = GetModuleFileNameW(
+        nullptr, executablePath.data(), MaxExtendedPath);
+    if (executablePathLength == 0 || executablePathLength >= MaxExtendedPath)
     {
         return false;
     }
     DWORD unused = 0;
-    const DWORD infoSize = GetFileVersionInfoSizeW(executablePath, &unused);
+    const DWORD infoSize = GetFileVersionInfoSizeW(executablePath.data(), &unused);
     if (infoSize == 0)
     {
         return false;
     }
     std::vector<std::byte> info(infoSize);
-    if (!GetFileVersionInfoW(executablePath, 0, infoSize, info.data()))
+    if (!GetFileVersionInfoW(
+            executablePath.data(), 0, infoSize, info.data()))
     {
         return false;
     }
@@ -1668,12 +1706,19 @@ bool Initialize(IPluginSelf* self)
     {
         return false;
     }
-    // Queue this before any later UI/console reload request can be drained.
-    self->hooks->Engine->PostToGameThread(&RecordGameThread, nullptr);
+    g_registrationThreadId.store(
+        GetCurrentThreadId(), std::memory_order_release);
+    g_registeredDuringStartup.store(
+        self->hooks->Splash != nullptr
+        && self->hooks->Splash->IsVisible != nullptr
+        && self->hooks->Splash->IsVisible(),
+        std::memory_order_release);
+    // Mark the transaction active before the first registration so an
+    // exception from a later host-side vector allocation rolls back every hook.
+    g_registered = true;
     self->hooks->Engine->RegisterOnTick(&OnEngineTick);
     self->hooks->World->RegisterOnWorldBeginPlay(&OnWorldBeginPlay);
     self->hooks->World->RegisterOnBeforeWorldEndPlay(&OnWorldEndPlay);
-    g_registered = true;
     g_nextWorldProbeAt = SteadyClock::now();
     return true;
 }
@@ -1683,8 +1728,14 @@ void Shutdown()
     if (g_registered && g_self != nullptr && g_self->hooks != nullptr
         && g_self->hooks->Engine != nullptr)
     {
+        const DWORD currentThreadId = GetCurrentThreadId();
         const DWORD gameThreadId = g_gameThreadId.load(std::memory_order_acquire);
-        if (gameThreadId != 0 && gameThreadId == GetCurrentThreadId())
+        const bool startupRegistrationThread =
+            g_registeredDuringStartup.load(std::memory_order_acquire)
+            && g_registrationThreadId.load(std::memory_order_acquire)
+                == currentThreadId;
+        if ((gameThreadId != 0 && gameThreadId == currentThreadId)
+            || CurrentThreadOwnsProcessWindow() || startupRegistrationThread)
         {
             UnregisterOnGameThread(nullptr);
         }
@@ -1692,11 +1743,11 @@ void Shutdown()
         {
             ResetEvent(g_cleanupEvent);
             g_self->hooks->Engine->PostToGameThread(&UnregisterOnGameThread, nullptr);
-            // This second queued callback lives in KernelBase, not this DLL.
-            // The event fires only after the plugin cleanup callback returned.
+            // This callback lives in KernelBase, so the game thread has fully
+            // returned from plugin cleanup before the waiting thread may unload
+            // this DLL. StarRupture is x64-only; SetEvent's single HANDLE
+            // argument uses the same Win64 call ABI and its BOOL is ignored.
             static_assert(sizeof(&SetEvent) == sizeof(PluginGameThreadCallback));
-            // StarRupture and the plugin are x64-only. On the Win64 ABI these
-            // functions have the same one-pointer call; the BOOL return is ignored.
             const auto signalEvent = std::bit_cast<PluginGameThreadCallback>(&SetEvent);
             g_self->hooks->Engine->PostToGameThread(
                 signalEvent, g_cleanupEvent);
@@ -1706,6 +1757,8 @@ void Shutdown()
     g_registered = false;
     g_world = nullptr;
     g_gameThreadId.store(0, std::memory_order_release);
+    g_registrationThreadId.store(0, std::memory_order_release);
+    g_registeredDuringStartup.store(false, std::memory_order_release);
     if (g_cleanupEvent != nullptr)
     {
         CloseHandle(g_cleanupEvent);

@@ -587,19 +587,22 @@ __declspec(dllexport) bool PluginInit(IPluginSelf* self)
         self->hooks->UI->RegisterOnPanelWindowClosed(&OnPanelClosed);
         self->hooks->Input->RegisterKeybindByName(
             g_openKey, EModKeyEvent::Pressed, &TogglePanel);
+        ResetConversation();
+        g_pollThread = std::jthread(&PollLoop);
+        LogInfo("Plugin initialized; press the configured key to open the chat");
+        // Keep live hook registration as the final potentially successful init
+        // step. If constructing the worker thread throws, no game-thread cleanup
+        // barrier has been installed yet.
         if (!RuptureCompanion::LiveContext::Initialize(self))
         {
             LogError("Live game-state hooks are unavailable; screenshot fallback remains active");
         }
-        ResetConversation();
-        g_pollThread = std::jthread(&PollLoop);
-        LogInfo("Plugin initialized; press the configured key to open the chat");
         return true;
     }
     catch (...)
     {
-        RuptureCompanion::LiveContext::Shutdown();
         LogError("Plugin initialization failed unexpectedly");
+        PluginShutdown();
         return false;
     }
 }
