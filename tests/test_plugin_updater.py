@@ -356,6 +356,16 @@ def test_daemon_signals_readiness_after_plugin_sync(tmp_path, monkeypatch):
 
     monkeypatch.setattr(daemon, "acquire_lock", acquire_lock)
     monkeypatch.setattr(
+        daemon,
+        "publish_lock_identity",
+        lambda _lock, identity: events.append(("publish", identity)),
+    )
+    monkeypatch.setattr(
+        daemon.screenshot,
+        "prepare",
+        lambda: events.append(("prepare", None)),
+    )
+    monkeypatch.setattr(
         daemon.plugin_updater,
         "sync_plugin",
         lambda bridge: events.append(("sync", bridge)),
@@ -370,8 +380,10 @@ def test_daemon_signals_readiness_after_plugin_sync(tmp_path, monkeypatch):
     daemon.main()
 
     assert events == [
-        ("lock", f"{os.getpid()}|test-nonce"),
+        ("lock", "starting"),
         ("sync", bridge),
+        ("prepare", None),
+        ("publish", f"{os.getpid()}|test-nonce"),
         ("ready", f"{os.getpid()}|test-nonce"),
         ("close", None),
     ]
@@ -400,6 +412,16 @@ def test_daemon_keeps_lock_as_readiness_for_legacy_launcher(tmp_path, monkeypatc
         lambda *_args: events.append("lock") or FakeLock(),
     )
     monkeypatch.setattr(
+        daemon,
+        "publish_lock_identity",
+        lambda *_args: events.append("publish"),
+    )
+    monkeypatch.setattr(
+        daemon.screenshot,
+        "prepare",
+        lambda: events.append("prepare"),
+    )
+    monkeypatch.setattr(
         daemon.time,
         "sleep",
         lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt),
@@ -407,7 +429,7 @@ def test_daemon_keeps_lock_as_readiness_for_legacy_launcher(tmp_path, monkeypatc
 
     daemon.main()
 
-    assert events == ["sync", "lock", "close"]
+    assert events == ["lock", "sync", "prepare", "publish", "close"]
     assert not (bridge / "daemon.ready").exists()
 
 
@@ -443,6 +465,12 @@ def test_daemon_defers_slow_migration_for_legacy_launcher(tmp_path, monkeypatch)
         lambda *_args: events.append("lock") or FakeLock(),
     )
     monkeypatch.setattr(
+        daemon,
+        "publish_lock_identity",
+        lambda *_args: events.append("publish"),
+    )
+    monkeypatch.setattr(daemon.screenshot, "prepare", lambda: events.append("prepare"))
+    monkeypatch.setattr(
         daemon.time,
         "sleep",
         lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt),
@@ -452,7 +480,7 @@ def test_daemon_defers_slow_migration_for_legacy_launcher(tmp_path, monkeypatch)
 
     assert migration_cancelled.wait(timeout=1)
     assert daemon.LEGACY_MIGRATION_GRACE_SECONDS < 10
-    assert events[:2] == ["recover", "sync"]
+    assert events[:3] == ["lock", "recover", "sync"]
     assert "cancelled" in events
     assert "mutated" not in events
     assert "lock" in events

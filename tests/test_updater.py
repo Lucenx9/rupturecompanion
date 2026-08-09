@@ -7,13 +7,17 @@ import pytest
 
 import updater
 
+ELF_X86_64_HEADER = b"\x7fELF\x02\x01" + (b"\0" * 12) + b"\x3e\0"
+
 
 def write_archive(path, files):
     with tarfile.open(path, "w:gz") as archive:
         for name, content in files.items():
-            encoded = content.encode()
+            encoded = content.encode() if isinstance(content, str) else content
             info = tarfile.TarInfo(name)
             info.size = len(encoded)
+            if name == "kwin-screenshot-helper":
+                info.mode = 0o755
             archive.addfile(info, io.BytesIO(encoded))
 
 
@@ -29,7 +33,7 @@ def test_extract_backend_accepts_complete_release(tmp_path):
             "screenshot.py": "screenshot",
             "updater.py": "updater",
             "daemon-capabilities.json": '{"ready_protocol": 1}',
-            "kwin-screenshot-helper": "helper",
+            "kwin-screenshot-helper": ELF_X86_64_HEADER,
             "VERSION": "v0.1.0\n",
         },
     )
@@ -37,6 +41,26 @@ def test_extract_backend_accepts_complete_release(tmp_path):
     updater.extract_backend(archive, destination)
 
     assert (destination / "VERSION").read_text() == "v0.1.0\n"
+
+
+def test_extract_backend_rejects_invalid_kwin_helper(tmp_path):
+    archive = tmp_path / "backend.tar.gz"
+    write_archive(
+        archive,
+        {
+            "daemon.py": "daemon = True",
+            "ai_backend.py": "backend = True",
+            "plugin_updater.py": "plugin_updater = True",
+            "screenshot.py": "screenshot = True",
+            "updater.py": "updater = True",
+            "daemon-capabilities.json": '{"ready_protocol": 1}',
+            "kwin-screenshot-helper": b"not an ELF",
+            "VERSION": "v0.1.0\n",
+        },
+    )
+
+    with pytest.raises(updater.UpdateError, match="invalid KWin screenshot helper"):
+        updater.extract_backend(archive, tmp_path / "backend")
 
 
 def test_extract_backend_rejects_path_traversal(tmp_path):
@@ -60,7 +84,7 @@ def test_extract_backend_rejects_invalid_python(tmp_path):
             "screenshot.py": "screenshot = True",
             "updater.py": "updater = True",
             "daemon-capabilities.json": '{"ready_protocol": 1}',
-            "kwin-screenshot-helper": "helper",
+            "kwin-screenshot-helper": ELF_X86_64_HEADER,
             "VERSION": "v0.1.0\n",
         },
     )
@@ -163,7 +187,7 @@ def test_update_backend_installs_release_and_keeps_rollback(tmp_path, monkeypatc
                 "screenshot.py": "screenshot = True",
                 "updater.py": "updater = True",
                 "daemon-capabilities.json": '{"ready_protocol": 1}',
-                "kwin-screenshot-helper": "helper",
+                "kwin-screenshot-helper": ELF_X86_64_HEADER,
                 "VERSION": "v0.2.0\n",
             },
         )

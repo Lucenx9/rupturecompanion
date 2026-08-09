@@ -25,7 +25,9 @@ _SHOT_DIR = Path(_SHOT_TEMP.name)
 _KWIN_HELPER_NAME = "kwin-screenshot-helper"
 _KWIN_INTERFACE = "org.kde.KWin.ScreenShot2"
 _KWIN_MAX_IMAGE_BYTES = 512 * 1024 * 1024
+_KWIN_RETRY_SECONDS = 30
 _kwin_direct_ready: bool | None = None
+_kwin_retry_after = 0.0
 
 
 @dataclass(frozen=True)
@@ -158,12 +160,13 @@ def _ensure_kwin_helper(environment: dict[str, str]) -> Path | None:
 
 
 def prepare() -> None:
-    global _kwin_direct_ready
+    global _kwin_direct_ready, _kwin_retry_after
     if os.name == "nt":
         return
     environment = _sanitized_environment()
     if not _kwin_session_available(environment):
         _kwin_direct_ready = False
+        _kwin_retry_after = float("inf")
         print(
             "Rupture Companion screenshot backend: Spectacle fallback",
             file=sys.stderr,
@@ -181,12 +184,14 @@ def prepare() -> None:
             probe.unlink(missing_ok=True)
     except (OSError, ScreenshotError, subprocess.SubprocessError, ValueError) as error:
         _kwin_direct_ready = False
+        _kwin_retry_after = time.monotonic() + _KWIN_RETRY_SECONDS
         print(
             f"Rupture Companion KWin setup failed: {error}; using Spectacle",
             file=sys.stderr,
         )
         return
     _kwin_direct_ready = True
+    _kwin_retry_after = 0.0
     print("Rupture Companion screenshot backend: direct KWin capture")
 
 
@@ -246,20 +251,22 @@ def _capture_with_kwin_helper(
     timeout: float,
     environment: dict[str, str],
 ) -> bool:
-    global _kwin_direct_ready
+    global _kwin_direct_ready, _kwin_retry_after
     if not _kwin_session_available(environment):
         return False
-    if _kwin_direct_ready is False:
+    if _kwin_direct_ready is False and time.monotonic() < _kwin_retry_after:
         return False
     try:
         helper = _ensure_kwin_helper(environment)
         if helper is None:
             return False
-        _capture_kwin_workspace(path, helper, timeout, environment)
+        _capture_kwin_workspace(path, helper, min(timeout, 1), environment)
         _kwin_direct_ready = True
+        _kwin_retry_after = 0.0
         return path.exists() and path.stat().st_size > 0
     except (OSError, ScreenshotError, subprocess.SubprocessError, ValueError) as error:
         _kwin_direct_ready = False
+        _kwin_retry_after = time.monotonic() + _KWIN_RETRY_SECONDS
         path.unlink(missing_ok=True)
         print(
             f"Rupture Companion direct KWin capture failed: "

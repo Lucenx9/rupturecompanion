@@ -30,6 +30,23 @@ class UpdateError(Exception):
     pass
 
 
+def _validate_kwin_helper(path: Path) -> None:
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(20)
+    except OSError as error:
+        raise UpdateError("invalid KWin screenshot helper") from error
+    is_x86_64_elf = (
+        len(header) == 20
+        and header[:6] == b"\x7fELF\x02\x01"
+        and int.from_bytes(header[18:20], "little") == 62
+    )
+    if not is_x86_64_elf:
+        raise UpdateError("invalid KWin screenshot helper")
+    if os.name != "nt" and not os.access(path, os.X_OK):
+        raise UpdateError("KWin screenshot helper is not executable")
+
+
 def extract_backend(archive_path: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=False)
     root = destination.resolve()
@@ -58,6 +75,7 @@ def extract_backend(archive_path: Path, destination: Path) -> None:
         ]
         if missing:
             raise UpdateError(f"incomplete backend archive: {', '.join(missing)}")
+        _validate_kwin_helper(destination / "kwin-screenshot-helper")
         for name in REQUIRED_FILES:
             if name.endswith(".py"):
                 try:
