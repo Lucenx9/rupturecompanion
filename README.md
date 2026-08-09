@@ -169,15 +169,19 @@ progress, queue, and item types when the client provides them.
 
 The native plugin writes a complete request to
 `StarRupture/Binaries/Win64/RuptureCompanion/question.txt`. The platform daemon
-captures a temporary screenshot, validates the versioned live-state JSON,
-invokes Claude in safe mode, and atomically publishes `answer.txt`. Both files
-use a sequence number, chat session ID, and final marker so neither side
+validates the versioned live-state JSON, invokes Claude in safe mode, and
+atomically publishes `answer.txt`. Fresh live telemetry is used without a
+desktop capture; this avoids fullscreen compositor flashes on Linux. Prefix a
+question with `/screen` to include a current screenshot. A screenshot is also
+captured automatically when no fresh live snapshot is available. Both bridge
+files use a sequence number, chat session ID, and final marker so neither side
 consumes partial data. Older plugin/backend combinations keep working and fall
 back to the screenshot when no valid live snapshot is present.
 
-Claude can read only the current screenshot and the validated read-only JSON
-included in the prompt. Snapshot strings are treated as untrusted data, not
-instructions. Bash, file editing, and game mutation tools are not available.
+Claude can read only an explicitly supplied/fallback screenshot and the
+validated read-only JSON included in the prompt. Snapshot strings are treated
+as untrusted data, not instructions. Bash, file editing, and game mutation
+tools are not available.
 Web sources are restricted by domain and validated before they reach the
 transcript. The backend then appends a versioned
 source-metadata block containing only the localized heading and approved site

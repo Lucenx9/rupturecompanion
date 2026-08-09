@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import traceback
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
@@ -258,10 +259,16 @@ def handle(
         if requested_web_mode is not None:
             conversation.web_enabled = requested_web_mode
         try:
-            with screenshot.capture_for_analysis() as shot:
+            should_capture = ai_backend.screenshot_requested(
+                question
+            ) or not ai_backend.fresh_live_context_available(game_state)
+            capture: AbstractContextManager[Path | None] = (
+                screenshot.capture_for_analysis() if should_capture else nullcontext()
+            )
+            with capture as shot:
                 response = ai_backend.ask(
                     question,
-                    str(shot),
+                    str(shot) if shot is not None else None,
                     conversation.history,
                     game_state=game_state,
                     web_tools_default=conversation.web_enabled,

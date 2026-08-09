@@ -198,6 +198,68 @@ def test_handle_captures_screenshot_and_remembers_non_web_answer(tmp_path, monke
     assert conversation.history == [("What is slow?", "Add one more smelter.")]
 
 
+def test_handle_skips_desktop_capture_when_fresh_live_state_is_available(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
+    snapshot = live_snapshot(captured_at_unix_ms=int(daemon.time.time() * 1000))
+    game_state = (
+        "Session mode: Standalone\n"
+        f"{daemon.LIVE_CONTEXT_MARKER}\n"
+        f"{json.dumps(snapshot, separators=(',', ':'))}"
+    )
+    observed = {}
+
+    @contextmanager
+    def forbidden_capture():
+        raise AssertionError("fresh live state must not trigger a desktop capture")
+        yield
+
+    def fake_ask(question, path, history, **kwargs):
+        observed["path"] = path
+        return daemon.ai_backend.AIResponse("Use the nearby base core.", used_web=False)
+
+    monkeypatch.setattr(daemon.screenshot, "capture_for_analysis", forbidden_capture)
+    monkeypatch.setattr(daemon.ai_backend, "ask", fake_ask)
+    conversation = daemon.Conversation(session_id="session-a")
+
+    daemon.handle(6, "Where should I go?", game_state, conversation)
+
+    assert observed["path"] is None
+    assert conversation.history == [("Where should I go?", "Use the nearby base core.")]
+
+
+def test_handle_screen_directive_forces_capture_with_fresh_live_state(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"png")
+    snapshot = live_snapshot(captured_at_unix_ms=int(daemon.time.time() * 1000))
+    game_state = (
+        "Session mode: Standalone\n"
+        f"{daemon.LIVE_CONTEXT_MARKER}\n"
+        f"{json.dumps(snapshot, separators=(',', ':'))}"
+    )
+    observed = {}
+
+    @contextmanager
+    def fake_capture():
+        yield shot
+
+    def fake_ask(question, path, history, **kwargs):
+        observed["path"] = path
+        return daemon.ai_backend.AIResponse("The crater is ahead.", used_web=False)
+
+    monkeypatch.setattr(daemon.screenshot, "capture_for_analysis", fake_capture)
+    monkeypatch.setattr(daemon.ai_backend, "ask", fake_ask)
+    conversation = daemon.Conversation(session_id="session-a")
+
+    daemon.handle(7, "/screen Where should I go?", game_state, conversation)
+
+    assert observed["path"] == str(shot)
+
+
 def test_handle_does_not_remember_backward_compatible_web_answer(tmp_path, monkeypatch):
     monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
     shot = tmp_path / "shot.png"

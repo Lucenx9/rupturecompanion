@@ -73,6 +73,7 @@ std::jthread g_pollThread;
 ChatState g_chat;
 char g_input[InputCapacity]{};
 bool g_enterWasDown = false;
+bool g_resetInputWidget = false;
 bool g_confirmNewChat = false;
 char g_openKey[64] = "F10";
 
@@ -199,7 +200,7 @@ void ResetConversation()
         AddMessageLocked(
             Message::Author::Companion,
             "Ask about what is on screen, your next production step, a recipe, or a "
-            "current patch. Use /web off to keep a conversation offline.");
+            "current patch. Use /screen for visual details and /web off to stay offline.");
     }
     if (canceledSequence != 0)
     {
@@ -207,6 +208,8 @@ void ResetConversation()
         RuptureCompanion::Bridge::WriteCancellation(
             canceledSequence, canceledSession, ignoredError);
     }
+    g_input[0] = '\0';
+    g_resetInputWidget = true;
 }
 
 std::string SessionContext()
@@ -267,7 +270,7 @@ bool SubmitQuestion(const std::string& rawQuestion)
         g_chat.waitingSince = std::chrono::steady_clock::now();
         g_chat.lastQuestion = question;
         g_chat.canRetry = false;
-        g_chat.status = "Analyzing live game state and screenshot...";
+        g_chat.status = "Analyzing game context...";
         AddMessageLocked(Message::Author::Player, question);
     }
 
@@ -435,8 +438,7 @@ void RenderPanel(IModLoaderImGui* ui)
             const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
                                      std::chrono::steady_clock::now() - waitingSince)
                                      .count();
-            status = "Analyzing live game state and screenshot... "
-                + std::to_string(seconds) + "s";
+            status = "Analyzing game context... " + std::to_string(seconds) + "s";
         }
         ui->TextDisabled(status.c_str());
         ui->Separator();
@@ -487,10 +489,25 @@ void RenderPanel(IModLoaderImGui* ui)
         }
         ui->EndChild();
 
+        const bool resetInputWidget = g_resetInputWidget;
+        g_resetInputWidget = false;
         ui->SetNextItemWidth(-92.0f);
-        ui->InputTextWithHint(
-            "##Question", "Ask Rupture Companion...", g_input, std::size(g_input));
-        const bool inputActive = ui->IsItemActive();
+        if (resetInputWidget)
+        {
+            // InputText keeps an internal edit buffer while its ImGui ID is active.
+            // Skip that ID for one frame after clearing our buffer so the stale edit
+            // state cannot copy the submitted question back on the following frame.
+            ui->BeginDisabled(true);
+            ui->InputTextWithHint(
+                "##QuestionReset", "Ask Rupture Companion...", g_input, std::size(g_input));
+            ui->EndDisabled();
+        }
+        else
+        {
+            ui->InputTextWithHint(
+                "##Question", "Ask Rupture Companion...", g_input, std::size(g_input));
+        }
+        const bool inputActive = !resetInputWidget && ui->IsItemActive();
         const bool enterDown = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
         const bool submitWithEnter = inputActive && enterDown && !g_enterWasDown;
         g_enterWasDown = enterDown;
@@ -502,6 +519,7 @@ void RenderPanel(IModLoaderImGui* ui)
         if ((submitWithButton || submitWithEnter) && SubmitQuestion(g_input))
         {
             g_input[0] = '\0';
+            g_resetInputWidget = true;
             g_confirmNewChat = false;
         }
 

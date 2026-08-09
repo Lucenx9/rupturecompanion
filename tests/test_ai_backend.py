@@ -48,6 +48,42 @@ def test_build_prompt_uses_star_rupture_context():
     assert "Player question: What should I build next?" in prompt
 
 
+def test_build_prompt_marks_visual_details_unknown_without_screenshot():
+    prompt = ai_backend.build_prompt("Where should I go?", None, [], "")
+
+    assert "Current screenshot: not captured" in prompt
+    assert "Treat visual details as unknown" in prompt
+
+
+def test_fresh_available_live_context_avoids_capture_unless_screen_is_requested(
+    monkeypatch,
+):
+    monkeypatch.setattr(ai_backend.time, "time", lambda: 1_700_000_000.0)
+    snapshot = {
+        "schema_version": 1,
+        "captured_at_unix_ms": 1_700_000_000_000,
+        "source": {
+            "kind": "client_observed",
+            "game_sdk_build": "CL121391",
+            "sample_interval_ms": 750,
+        },
+        "status": {
+            "available": True,
+            "partial": False,
+            "missing_sections": [],
+            "truncated_sections": [],
+        },
+    }
+    game_state = (
+        f"{ai_backend.LIVE_CONTEXT_MARKER}\n"
+        f"{json.dumps(snapshot, separators=(',', ':'))}"
+    )
+
+    assert ai_backend.fresh_live_context_available(game_state)
+    assert not ai_backend.screenshot_requested("Where should I go?")
+    assert ai_backend.screenshot_requested(" /screen Where should I go?")
+
+
 def test_build_prompt_separates_validated_live_context_from_metadata():
     snapshot = {
         "schema_version": 1,
@@ -406,6 +442,30 @@ def test_ask_limits_claude_to_screenshot_and_approved_web(monkeypatch, tmp_path)
     assert "WebFetch(domain:store.steampowered.com)" in allowed
     assert "Bash" not in command[command.index("--tools") + 1]
     assert observed["kwargs"]["cwd"] == screenshot.parent
+
+
+def test_ask_without_screenshot_does_not_grant_local_file_tools(monkeypatch):
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=response_envelope("Follow the live objective marker."),
+            stderr="",
+        )
+
+    monkeypatch.setattr(ai_backend.subprocess, "run", fake_run)
+
+    answer = ai_backend.ask("Where should I go?", None, [], web_tools_default=False)
+
+    assert answer.text == "Follow the live objective marker."
+    command = observed["command"]
+    assert command[command.index("--tools") + 1] == ""
+    assert command[command.index("--allowedTools") + 1] == ""
+    assert observed["kwargs"]["cwd"] == Path.cwd()
 
 
 @pytest.mark.parametrize(
