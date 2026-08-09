@@ -260,6 +260,39 @@ def test_download_rejects_an_oversized_release(tmp_path, monkeypatch):
         updater._download(tmp_path / "archive", tmp_path / "etag")
 
 
+@pytest.mark.parametrize(
+    "content_length",
+    [
+        "not-a-number",
+        "-1",
+        "+12",
+        "1_000",
+        " 12",
+        pytest.param("1" * 5000, id="too-many-digits"),
+    ],
+)
+def test_download_rejects_malformed_content_length(
+    tmp_path, monkeypatch, content_length
+):
+    class FakeResponse:
+        headers = {"Content-Length": content_length}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(
+        updater.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+    with pytest.raises(updater.UpdateError, match="invalid backend download size"):
+        updater._download(tmp_path / "archive", tmp_path / "etag")
+
+
 def test_update_backend_installs_release_and_keeps_rollback(tmp_path, monkeypatch):
     installed = tmp_path / "backend"
     installed.mkdir()

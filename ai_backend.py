@@ -29,11 +29,13 @@ NON_PUBLIC_DNS_SUFFIXES = (
     "onion",
     "test",
 )
+NON_DOMAIN_FILE_SUFFIXES = frozenset({"dll", "exe", "ini", "json", "log", "pak"})
 WEB_TOOLS = "Read,WebSearch"
 LOCAL_TIMEOUT_SECONDS = 120
 WEB_TIMEOUT_SECONDS = 180
 MAX_SOURCES = 3
 MAX_SOURCE_URL_CHARS = 2048
+MAX_SOURCE_LABEL_CHARS = 64
 HISTORY_TURNS = 6
 MODEL = "sonnet"
 SOURCE_BLOCK_MARKER = "__RC_SOURCES_V1__"
@@ -454,10 +456,15 @@ def _contains_control_characters(value: str) -> bool:
 
 
 def _contains_url(value: str) -> bool:
-    return "://" in value or DOMAIN_LIKE_PATTERN.search(value) is not None
+    if "://" in value:
+        return True
+    return any(
+        match.group().rsplit(".", 1)[-1].casefold() not in NON_DOMAIN_FILE_SUFFIXES
+        for match in DOMAIN_LIKE_PATTERN.finditer(value)
+    )
 
 
-def _validated_source_label(url: str) -> str | None:
+def _validated_source(url: str) -> tuple[str, str] | None:
     if (
         not url
         or len(url) > MAX_SOURCE_URL_CHARS
@@ -492,22 +499,28 @@ def _validated_source_label(url: str) -> str | None:
             return None
     for domain, label in FRIENDLY_WEB_SOURCE_LABELS:
         if hostname == domain or hostname.endswith(f".{domain}"):
-            return label
-    return hostname.removeprefix("www.")
+            return label, hostname
+    label = hostname.removeprefix("www.")
+    if len(label) > MAX_SOURCE_LABEL_CHARS:
+        label = f"...{label[-(MAX_SOURCE_LABEL_CHARS - 3) :]}"
+    return label, hostname
 
 
 def _validated_sources(value: object) -> list[tuple[str, str]]:
     if not isinstance(value, list) or len(value) > MAX_SOURCES:
         raise AIError("invalid structured output from Claude")
     sources: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    seen_hosts: set[str] = set()
     for source in value:
         if not isinstance(source, dict) or set(source) != {"url"}:
             raise AIError("invalid structured output from Claude")
         url = source["url"]
-        label = _validated_source_label(url) if isinstance(url, str) else None
-        if label is not None and label not in seen:
-            seen.add(label)
+        validated = _validated_source(url) if isinstance(url, str) else None
+        if validated is None:
+            continue
+        label, hostname = validated
+        if hostname not in seen_hosts:
+            seen_hosts.add(hostname)
             sources.append((label, url))
     return sources
 

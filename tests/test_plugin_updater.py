@@ -514,6 +514,29 @@ def test_legacy_launcher_grace_bounds_blocked_recovery(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Bash installer is Linux-only")
+def test_bash_installer_explains_missing_modloader_logs(tmp_path):
+    game_root = tmp_path / "StarRupture"
+    binary_dir = game_root / "StarRupture/Binaries/Win64"
+    (binary_dir / "ModLoader/Plugins").mkdir(parents=True)
+    (binary_dir / "StarRuptureGameSteam-Win64-Shipping.exe").write_bytes(b"")
+    (binary_dir / "dwmapi.dll").write_bytes(b"MZ")
+    environment = os.environ.copy()
+    environment.pop("RC_PLUGIN_INTERFACE", None)
+
+    result = subprocess.run(
+        [str(Path(__file__).parent.parent / "install-plugin.sh"), str(game_root)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    assert "Could not detect the Mod Loader plugin interface." in result.stderr
+    assert "Launch StarRupture once" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Bash installer is Linux-only")
 def test_bash_installer_detects_new_loader_log_format(tmp_path):
     game_root = tmp_path / "StarRupture"
     binary_dir = game_root / "StarRupture/Binaries/Win64"

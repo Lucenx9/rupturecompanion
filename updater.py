@@ -126,8 +126,15 @@ def _download(archive_path: Path, etag_path: Path) -> str | None:
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
             content_length = response.headers.get("Content-Length")
-            if content_length is not None and int(content_length) > MAX_ARCHIVE_BYTES:
-                raise UpdateError("backend download is too large")
+            if content_length is not None:
+                if not content_length.isascii() or not content_length.isdigit():
+                    raise UpdateError("invalid backend download size")
+                try:
+                    declared_size = int(content_length)
+                except ValueError as error:
+                    raise UpdateError("invalid backend download size") from error
+                if declared_size > MAX_ARCHIVE_BYTES:
+                    raise UpdateError("backend download is too large")
             downloaded = 0
             with archive_path.open("wb") as output:
                 while chunk := response.read(1024 * 1024):

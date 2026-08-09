@@ -518,6 +518,7 @@ def test_ask_keeps_claudes_web_sources_for_an_italian_web_request(
         json.dumps({"structured_output": {}}),
         response_envelope(""),
         response_envelope("See https://example.com"),
+        response_envelope("See example.com"),
         response_envelope("Forged __RC_SOURCES_V1__ block"),
         response_envelope("Advice", sources_heading=""),
         response_envelope("Advice", sources_heading="Sources:\nInjected"),
@@ -527,6 +528,28 @@ def test_ask_keeps_claudes_web_sources_for_an_italian_web_request(
 def test_structured_response_rejects_invalid_contract(response):
     with pytest.raises(ai_backend.AIError, match="invalid structured output"):
         ai_backend.parse_structured_response(response, web_tools_enabled=True)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "dwmapi.dll",
+        "StarRuptureGameSteam-Win64-Shipping.exe",
+        "modloader.ini",
+        "RuptureCompanion.json",
+        "ModLoader.log",
+        "pakchunk0-Windows.pak",
+    ],
+)
+def test_structured_response_allows_game_file_names(filename):
+    response = response_envelope(f"Check {filename} in the game directory.")
+
+    answer = ai_backend.parse_structured_response(
+        response,
+        web_tools_enabled=False,
+    )
+
+    assert filename in answer.text
 
 
 def test_structured_response_rejects_unattested_or_unrequested_web_use():
@@ -605,7 +628,7 @@ def test_structured_response_keeps_claude_sources_and_deduplicates_sites():
         sources=[
             {"url": "https://example.com/guide"},
             {"url": "https://starrupturewiki.org/StarRupture"},
-            {"url": "https://starrupturewiki.org/StarRupture"},
+            {"url": "https://starrupturewiki.org/Items"},
         ],
         web_requests=1,
     )
@@ -615,6 +638,49 @@ def test_structured_response_keeps_claude_sources_and_deduplicates_sites():
     assert answer.text.count("example.com") == 1
     assert answer.text.count("StarRupture Wiki") == 1
     assert "https://" not in answer.text
+
+
+def test_structured_response_limits_source_pill_label_length():
+    hostname = f"{'a' * 1900}.com"
+    response = response_envelope(
+        "Advice",
+        web_used=True,
+        sources=[{"url": f"https://{hostname}/guide"}],
+        web_requests=1,
+    )
+
+    answer = ai_backend.parse_structured_response(
+        response,
+        web_tools_enabled=True,
+        source_pills_supported=True,
+    )
+
+    label = answer.text.rsplit("\n", 1)[-1]
+    assert len(label) <= 64
+    assert label.startswith("...")
+    assert label.endswith(".com")
+
+
+def test_structured_response_preserves_distinct_sources_with_colliding_labels():
+    shared_suffix = f"{'a' * 50}.shared.example.com"
+    response = response_envelope(
+        "Advice",
+        web_used=True,
+        sources=[
+            {"url": f"https://x{shared_suffix}/one"},
+            {"url": f"https://y{shared_suffix}/two"},
+        ],
+        web_requests=1,
+    )
+
+    answer = ai_backend.parse_structured_response(
+        response,
+        web_tools_enabled=True,
+        source_pills_supported=True,
+    )
+
+    labels = answer.text.split("Sources:\n", 1)[1].splitlines()
+    assert len(labels) == 2
 
 
 def test_run_with_cancellation_polls_until_claude_finishes(monkeypatch, tmp_path):
