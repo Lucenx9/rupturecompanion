@@ -507,9 +507,12 @@ void RenderPanel(IModLoaderImGui* ui)
             ui->InputTextWithHint(
                 "##Question", "Ask Rupture Companion...", g_input, std::size(g_input));
         }
-        const bool inputActive = !resetInputWidget && ui->IsItemActive();
+        // Single-line InputText clears its active ID before returning on Enter,
+        // but it keeps keyboard focus. IsItemFocused therefore preserves the
+        // submission edge that IsItemActive would miss in that frame.
+        const bool inputFocused = !resetInputWidget && ui->IsItemFocused();
         const bool enterDown = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
-        const bool submitWithEnter = inputActive && enterDown && !g_enterWasDown;
+        const bool submitWithEnter = inputFocused && enterDown && !g_enterWasDown;
         g_enterWasDown = enterDown;
         ui->SameLine(0.0f, 6.0f);
         ui->BeginDisabled(waiting || Trim(g_input).empty());

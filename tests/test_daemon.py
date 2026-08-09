@@ -260,6 +260,68 @@ def test_handle_screen_directive_forces_capture_with_fresh_live_state(
     assert observed["path"] == str(shot)
 
 
+def test_handle_keeps_automatic_windows_capture_with_fresh_live_state(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
+    monkeypatch.setattr(daemon, "WINDOWS_SCREENSHOT_DEFAULT", True)
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"png")
+    snapshot = live_snapshot(captured_at_unix_ms=int(daemon.time.time() * 1000))
+    game_state = (
+        f"{daemon.LIVE_CONTEXT_MARKER}\n{json.dumps(snapshot, separators=(',', ':'))}"
+    )
+    observed = {}
+
+    @contextmanager
+    def fake_capture():
+        yield shot
+
+    def fake_ask(question, path, history, **kwargs):
+        observed["path"] = path
+        return daemon.ai_backend.AIResponse("Use both inputs.", used_web=False)
+
+    monkeypatch.setattr(daemon.screenshot, "capture_for_analysis", fake_capture)
+    monkeypatch.setattr(daemon.ai_backend, "ask", fake_ask)
+    conversation = daemon.Conversation(session_id="session-a")
+
+    daemon.handle(8, "What should I do?", game_state, conversation)
+
+    assert observed["path"] == str(shot)
+
+
+def test_handle_windows_capture_failure_falls_back_to_fresh_live_state(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
+    monkeypatch.setattr(daemon, "WINDOWS_SCREENSHOT_DEFAULT", True)
+    snapshot = live_snapshot(captured_at_unix_ms=int(daemon.time.time() * 1000))
+    game_state = (
+        f"{daemon.LIVE_CONTEXT_MARKER}\n{json.dumps(snapshot, separators=(',', ':'))}"
+    )
+    observed = {}
+
+    @contextmanager
+    def failed_capture():
+        raise daemon.screenshot.ScreenshotError("capture failed")
+        yield
+
+    def fake_ask(question, path, history, **kwargs):
+        observed["path"] = path
+        return daemon.ai_backend.AIResponse("Live data is enough.", used_web=False)
+
+    monkeypatch.setattr(daemon.screenshot, "capture_for_analysis", failed_capture)
+    monkeypatch.setattr(daemon.ai_backend, "ask", fake_ask)
+    conversation = daemon.Conversation(session_id="session-a")
+
+    daemon.handle(9, "What should I do?", game_state, conversation)
+
+    assert observed["path"] is None
+    assert "Live data is enough." in (tmp_path / "answer.txt").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_handle_does_not_remember_backward_compatible_web_answer(tmp_path, monkeypatch):
     monkeypatch.setenv("RC_BRIDGE_DIR", str(tmp_path))
     shot = tmp_path / "shot.png"

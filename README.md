@@ -170,13 +170,16 @@ progress, queue, and item types when the client provides them.
 The native plugin writes a complete request to
 `StarRupture/Binaries/Win64/RuptureCompanion/question.txt`. The platform daemon
 validates the versioned live-state JSON, invokes Claude in safe mode, and
-atomically publishes `answer.txt`. Fresh live telemetry is used without a
-desktop capture; this avoids fullscreen compositor flashes on Linux. Prefix a
-question with `/screen` to include a current screenshot. A screenshot is also
-captured automatically when no fresh live snapshot is available. Both bridge
-files use a sequence number, chat session ID, and final marker so neither side
-consumes partial data. Older plugin/backend combinations keep working and fall
-back to the screenshot when no valid live snapshot is present.
+atomically publishes `answer.txt`. On Linux, fresh live telemetry is used
+without an automatic desktop capture; this avoids fullscreen compositor
+flashes. Prefix a question with `/screen` to include a current screenshot. A
+screenshot is also captured automatically when no fresh live snapshot is
+available. On Windows, the daemon keeps the screenshot by default through
+Pillow's in-process ImageGrab path and falls back to fresh telemetry if that
+capture fails. Both bridge files use a sequence number, chat session ID, and
+final marker so neither side consumes partial data. Older plugin/backend
+combinations keep working and fall back to the screenshot when no valid live
+snapshot is present.
 
 Claude can read only an explicitly supplied/fallback screenshot and the
 validated read-only JSON included in the prompt. Snapshot strings are treated

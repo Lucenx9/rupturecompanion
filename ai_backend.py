@@ -18,7 +18,7 @@ APPROVED_WEB_SOURCES = (
     ("starrupturewiki.org", "StarRupture Wiki"),
 )
 APPROVED_WEB_DOMAINS = tuple(domain for domain, _ in APPROVED_WEB_SOURCES)
-WEB_TOOLS = "Read,WebSearch,WebFetch"
+WEB_TOOLS = ("WebSearch", "WebFetch")
 LOCAL_TIMEOUT_SECONDS = 120
 WEB_TIMEOUT_SECONDS = 180
 MAX_SOURCES = 3
@@ -689,7 +689,10 @@ def ask(
     preference = explicit_web_preference(question)
     web_enabled = web_tools_default if preference is None else preference
     web_required = _web_research_required(question)
-    tools = WEB_TOOLS if web_enabled else ("Read" if screenshot is not None else "")
+    enabled_tools = ["Read"] if screenshot is not None else []
+    if web_enabled:
+        enabled_tools.extend(WEB_TOOLS)
+    tools = ",".join(enabled_tools)
     allowed_tools = [f"Read({screenshot.as_posix()})"] if screenshot is not None else []
     if web_enabled:
         allowed_tools.append("WebSearch")

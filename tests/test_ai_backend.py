@@ -415,6 +415,17 @@ def test_native_project_links_the_exact_game_sdk_wrappers():
     assert 'Include="plugin\\live_context.cpp"' in project
 
 
+def test_native_chat_input_preserves_enter_and_clears_active_edit_state():
+    plugin_source = (Path(__file__).parents[1] / "plugin/plugin.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ui->IsItemFocused()" in plugin_source
+    assert "submitWithEnter = inputFocused" in plugin_source
+    assert '"##QuestionReset"' in plugin_source
+    assert "g_resetInputWidget = true;" in plugin_source
+
+
 def test_ask_limits_claude_to_screenshot_and_approved_web(monkeypatch, tmp_path):
     screenshot = tmp_path / "shot.png"
     screenshot.write_bytes(b"png")
@@ -466,6 +477,29 @@ def test_ask_without_screenshot_does_not_grant_local_file_tools(monkeypatch):
     assert command[command.index("--tools") + 1] == ""
     assert command[command.index("--allowedTools") + 1] == ""
     assert observed["kwargs"]["cwd"] == Path.cwd()
+
+
+def test_ask_without_screenshot_excludes_read_when_web_is_enabled(monkeypatch):
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=response_envelope("Follow the live objective marker."),
+            stderr="",
+        )
+
+    monkeypatch.setattr(ai_backend.subprocess, "run", fake_run)
+
+    ai_backend.ask("Where should I go?", None, [])
+
+    command = observed["command"]
+    assert command[command.index("--tools") + 1] == "WebSearch,WebFetch"
+    allowed = command[command.index("--allowedTools") + 1]
+    assert "Read" not in allowed
+    assert "WebSearch" in allowed
 
 
 @pytest.mark.parametrize(
