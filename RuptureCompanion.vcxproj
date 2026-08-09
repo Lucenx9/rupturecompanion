@@ -51,9 +51,8 @@
       <RuntimeLibrary Condition="'$(Configuration)'=='Client Debug'">MultiThreadedDebug</RuntimeLibrary>
       <RuntimeLibrary Condition="'$(Configuration)'=='Client Release'">MultiThreaded</RuntimeLibrary>
       <AdditionalIncludeDirectories>$(PluginSDKInclude);$(ProjectDir)include;$(ProjectDir)plugin;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <ExternalIncludePath>$(GameSDKClientDir);$(GameSDKSourceDir);$(ExternalIncludePath)</ExternalIncludePath>
       <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /external:I&quot;$(GameSDKRoot)\Client&quot; /external:I&quot;$(GameSDKRoot)\Client\SDK&quot; /external:W0 %(AdditionalOptions)</AdditionalOptions>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <Link>
