@@ -39,7 +39,8 @@ buildings, characters, or saves.
 - Windows 10/11, or Linux with Steam/Proton and `util-linux` (`flock` and
   `setsid`)
 - Python 3.12+ and [`uv`](https://docs.astral.sh/uv/)
-- Spectacle on Linux; Windows screenshots use Pillow automatically
+- KDE Plasma screenshots use KWin directly; Spectacle is the automatic Linux
+  fallback, while Windows uses Pillow in-process
 - Steam and StarRupture
 - [StarRupture Mod Loader](https://github.com/AlienXAXS/StarRupture-ModLoader)
 - A logged-in `claude` CLI supporting `--json-schema` and
@@ -169,22 +170,15 @@ progress, queue, and item types when the client provides them.
 
 The native plugin writes a complete request to
 `StarRupture/Binaries/Win64/RuptureCompanion/question.txt`. The platform daemon
-validates the versioned live-state JSON, invokes Claude in safe mode, and
-atomically publishes `answer.txt`. On Linux, fresh live telemetry is used
-without an automatic desktop capture; this avoids fullscreen compositor
-flashes. Prefix a question with `/screen` to include a current screenshot. A
-screenshot is also captured automatically when no fresh live snapshot is
-available. On Windows, the daemon keeps the screenshot by default through
-Pillow's in-process ImageGrab path and falls back to fresh telemetry if that
-capture fails. Both bridge files use a sequence number, chat session ID, and
-final marker so neither side consumes partial data. Older plugin/backend
-combinations keep working and fall back to the screenshot when no valid live
-snapshot is present.
+captures a temporary screenshot, validates the versioned live-state JSON,
+invokes Claude in safe mode, and atomically publishes `answer.txt`. Both files
+use a sequence number, chat session ID, and final marker so neither side
+consumes partial data. Older plugin/backend combinations keep working and fall
+back to the screenshot when no valid live snapshot is present.
 
-Claude can read only an explicitly supplied/fallback screenshot and the
-validated read-only JSON included in the prompt. Snapshot strings are treated
-as untrusted data, not instructions. Bash, file editing, and game mutation
-tools are not available.
+Claude can read only the current screenshot and the validated read-only JSON
+included in the prompt. Snapshot strings are treated as untrusted data, not
+instructions. Bash, file editing, and game mutation tools are not available.
 Web sources are restricted by domain and validated before they reach the
 transcript. The backend then appends a versioned
 source-metadata block containing only the localized heading and approved site

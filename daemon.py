@@ -4,7 +4,6 @@ import sys
 import threading
 import time
 import traceback
-from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
@@ -36,7 +35,6 @@ STEAM_ROOTS = (
     Path.home() / ".steam/steam",
 )
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
-WINDOWS_SCREENSHOT_DEFAULT = os.name == "nt"
 
 
 class DaemonAlreadyRunning(Exception):
@@ -260,19 +258,10 @@ def handle(
         if requested_web_mode is not None:
             conversation.web_enabled = requested_web_mode
         try:
-            force_screenshot = ai_backend.screenshot_requested(question)
-            fresh_live_context = ai_backend.fresh_live_context_available(game_state)
-            should_capture = (
-                force_screenshot or WINDOWS_SCREENSHOT_DEFAULT or not fresh_live_context
-            )
-            capture: AbstractContextManager[Path | None] = (
-                screenshot.capture_for_analysis() if should_capture else nullcontext()
-            )
-
-            def request_answer(screenshot_path: str | None) -> ai_backend.AIResponse:
-                return ai_backend.ask(
+            with screenshot.capture_for_analysis() as shot:
+                response = ai_backend.ask(
                     question,
-                    screenshot_path,
+                    str(shot),
                     conversation.history,
                     game_state=game_state,
                     web_tools_default=conversation.web_enabled,
@@ -280,14 +269,6 @@ def handle(
                         sequence, session_id
                     ),
                 )
-
-            try:
-                with capture as shot:
-                    response = request_answer(str(shot) if shot is not None else None)
-            except screenshot.ScreenshotError:
-                if force_screenshot or not fresh_live_context:
-                    raise
-                response = request_answer(None)
             pending = PendingAnswer(
                 sequence,
                 session_id,

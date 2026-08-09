@@ -200,7 +200,7 @@ void ResetConversation()
         AddMessageLocked(
             Message::Author::Companion,
             "Ask about what is on screen, your next production step, a recipe, or a "
-            "current patch. Use /screen for visual details and /web off to stay offline.");
+            "current patch. Use /web off to keep a conversation offline.");
     }
     if (canceledSequence != 0)
     {
@@ -270,7 +270,7 @@ bool SubmitQuestion(const std::string& rawQuestion)
         g_chat.waitingSince = std::chrono::steady_clock::now();
         g_chat.lastQuestion = question;
         g_chat.canRetry = false;
-        g_chat.status = "Analyzing game context...";
+        g_chat.status = "Analyzing live game state and screenshot...";
         AddMessageLocked(Message::Author::Player, question);
     }
 
@@ -438,7 +438,8 @@ void RenderPanel(IModLoaderImGui* ui)
             const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
                                      std::chrono::steady_clock::now() - waitingSince)
                                      .count();
-            status = "Analyzing game context... " + std::to_string(seconds) + "s";
+            status = "Analyzing live game state and screenshot... "
+                + std::to_string(seconds) + "s";
         }
         ui->TextDisabled(status.c_str());
         ui->Separator();
