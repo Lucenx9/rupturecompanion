@@ -20,6 +20,14 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy
       - if: runner.os == 'Linux'
+        name: Build fixed-purpose KWin screenshot helper
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+          cc -std=c17 -O2 -Wall -Wextra -Werror \
+            $(pkg-config --cflags dbus-1) kwin_screenshot_helper.c \
+            -o kwin-screenshot-helper $(pkg-config --libs dbus-1)
+      - if: runner.os == 'Linux'
         run: shellcheck run-with-companion.sh install-plugin.sh
       - if: runner.os == 'Windows'
         name: Parse PowerShell launch and install scripts

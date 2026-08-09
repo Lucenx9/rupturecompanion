@@ -1,4 +1,3 @@
-import filecmp
 import hashlib
 import os
 import shutil
@@ -8,8 +7,8 @@ import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from PIL import Image, ImageGrab
 
@@ -23,11 +22,47 @@ _SHOT_TEMP = tempfile.TemporaryDirectory(
     ignore_cleanup_errors=True,
 )
 _SHOT_DIR = Path(_SHOT_TEMP.name)
-_KWIN_HELPER_NAME = "rupture-companion-screenshot-helper"
+_KWIN_HELPER_NAME = "kwin-screenshot-helper"
 _KWIN_INTERFACE = "org.kde.KWin.ScreenShot2"
-_KWIN_SERVICE = "org.kde.KWin.ScreenShot2"
-_KWIN_OBJECT = "/org/kde/KWin/ScreenShot2"
 _KWIN_MAX_IMAGE_BYTES = 512 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _KWinImageInfo:
+    width: int
+    height: int
+    stride: int
+    image_format: int
+
+    @classmethod
+    def parse(cls, output: str) -> "_KWinImageInfo":
+        fields = output.strip().split()
+        if len(fields) != 5 or fields[0] != "raw":
+            raise ScreenshotError("KWin helper returned invalid image metadata")
+        try:
+            info = cls(*(int(value) for value in fields[1:]))
+        except ValueError as error:
+            raise ScreenshotError(
+                "KWin helper returned invalid image metadata"
+            ) from error
+        info.validate()
+        return info
+
+    @property
+    def size(self) -> int:
+        return self.stride * self.height
+
+    def validate(self) -> None:
+        if not (0 < self.width <= 32768 and 0 < self.height <= 32768):
+            raise ScreenshotError("KWin returned unsafe image dimensions")
+        if self.stride < self.width * 4:
+            raise ScreenshotError("KWin returned an invalid image stride")
+        if not (0 < self.size <= _KWIN_MAX_IMAGE_BYTES):
+            raise ScreenshotError("KWin returned an unsafe image size")
+        if self.image_format not in (4, 5, 6):
+            raise ScreenshotError(
+                f"KWin returned unsupported QImage format {self.image_format}"
+            )
 
 
 def _sanitized_environment() -> dict[str, str]:
@@ -52,34 +87,6 @@ def _desktop_exec_path(path: Path) -> str:
     for character in ("\\", '"', "`", "$"):
         value = value.replace(character, f"\\{character}")
     return f'"{value}"'
-
-
-def _same_executable(source: Path, helper: Path) -> bool:
-    try:
-        if os.path.samestat(source.stat(), helper.stat()):
-            return True
-        return filecmp.cmp(source, helper, shallow=True)
-    except OSError:
-        return False
-
-
-def _install_helper_executable(source: Path, helper: Path) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=helper.parent,
-        prefix=f".{_KWIN_HELPER_NAME}-",
-    )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    temporary.unlink()
-    try:
-        try:
-            os.link(source, temporary)
-        except OSError:
-            shutil.copy2(source, temporary)
-        temporary.chmod(0o755)
-        temporary.replace(helper)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _write_if_changed(path: Path, content: str) -> bool:
@@ -108,158 +115,112 @@ def _ensure_kwin_helper(environment: dict[str, str]) -> Path | None:
     if not _kwin_session_available(environment):
         return None
 
+    helper = Path(__file__).with_name(_KWIN_HELPER_NAME).resolve()
+    if not helper.is_file() or not os.access(helper, os.X_OK):
+        raise ScreenshotError(f"fixed-purpose KWin helper is unavailable: {helper}")
+
+    identity = hashlib.sha256(str(helper).encode()).hexdigest()[:12]
+    data_home = Path(environment.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    desktop_file = (
+        data_home
+        / "applications"
+        / f"rupture-companion-screenshot-helper-{identity}.desktop"
+    )
+    desktop_entry = "\n".join(
+        (
+            "[Desktop Entry]",
+            "Type=Application",
+            "Name=Rupture Companion Screenshot Helper",
+            "NoDisplay=true",
+            f"Exec={_desktop_exec_path(helper)}",
+            f"X-KDE-DBUS-Restricted-Interfaces={_KWIN_INTERFACE}",
+            "",
+        )
+    )
+    changed = _write_if_changed(desktop_file, desktop_entry)
+    ready_marker = helper.with_name(f".{helper.name}-{identity}.ready")
+    if changed:
+        ready_marker.unlink(missing_ok=True)
+    if not ready_marker.exists():
+        cache_builder = shutil.which("kbuildsycoca6") or shutil.which("kbuildsycoca5")
+        if cache_builder is None:
+            raise ScreenshotError("kbuildsycoca is unavailable")
+        subprocess.run(
+            [cache_builder, "--noincremental"],
+            check=True,
+            capture_output=True,
+            timeout=15,
+            env=environment,
+        )
+        ready_marker.touch()
+    return helper
+
+
+def prepare() -> None:
+    if os.name == "nt":
+        return
+    environment = _sanitized_environment()
+    if not _kwin_session_available(environment):
+        print(
+            "Rupture Companion screenshot backend: Spectacle fallback",
+            file=sys.stderr,
+        )
+        return
     try:
-        source = Path(sys.executable).resolve(strict=True)
-        helper = Path(sys.executable).parent / _KWIN_HELPER_NAME
-        if not _same_executable(source, helper):
-            _install_helper_executable(source, helper)
-
-        identity = hashlib.sha256(str(helper).encode()).hexdigest()[:12]
-        data_home = Path(
-            environment.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+        helper = _ensure_kwin_helper(environment)
+    except (OSError, ScreenshotError, subprocess.SubprocessError, ValueError) as error:
+        print(
+            f"Rupture Companion KWin setup failed: {error}; using Spectacle",
+            file=sys.stderr,
         )
-        desktop_file = (
-            data_home
-            / "applications"
-            / f"rupture-companion-screenshot-helper-{identity}.desktop"
-        )
-        desktop_entry = "\n".join(
-            (
-                "[Desktop Entry]",
-                "Type=Application",
-                "Name=Rupture Companion Screenshot Helper",
-                "NoDisplay=true",
-                f"Exec={_desktop_exec_path(helper)}",
-                f"X-KDE-DBUS-Restricted-Interfaces={_KWIN_INTERFACE}",
-                "",
-            )
-        )
-        changed = _write_if_changed(desktop_file, desktop_entry)
-        ready_marker = helper.with_name(f".{helper.name}-{identity}.ready")
-        if changed:
-            ready_marker.unlink(missing_ok=True)
-        if not ready_marker.exists():
-            cache_builder = shutil.which("kbuildsycoca6") or shutil.which(
-                "kbuildsycoca5"
-            )
-            if cache_builder is None:
-                return None
-            subprocess.run(
-                [cache_builder, "--noincremental"],
-                check=True,
-                capture_output=True,
-                timeout=15,
-                env=environment,
-            )
-            ready_marker.touch()
-        return helper
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
+        return
+    if helper is not None:
+        print("Rupture Companion screenshot backend: direct KWin capture")
 
 
-def _variant_value(metadata: dict[str, Any], key: str) -> Any:
-    variant = metadata.get(key)
-    if not isinstance(variant, tuple) or len(variant) != 2:
-        raise ScreenshotError(f"KWin returned invalid {key} metadata")
-    return variant[1]
-
-
-def _read_image_bytes(descriptor: int, expected_size: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = expected_size
-    while remaining:
-        chunk = os.read(descriptor, min(remaining, 1024 * 1024))
-        if not chunk:
-            break
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    image_bytes = b"".join(chunks)
-    if len(image_bytes) != expected_size:
-        raise ScreenshotError(
-            f"KWin returned {len(image_bytes)} of {expected_size} image bytes"
-        )
-    return image_bytes
-
-
-def _save_kwin_image(path: Path, metadata: dict[str, Any], image_bytes: bytes) -> None:
-    image_type = _variant_value(metadata, "type")
-    width = _variant_value(metadata, "width")
-    height = _variant_value(metadata, "height")
-    stride = _variant_value(metadata, "stride")
-    image_format = _variant_value(metadata, "format")
-    if image_type != "raw":
-        raise ScreenshotError(f"KWin returned unsupported image type: {image_type}")
-    if not all(isinstance(value, int) for value in (width, height, stride)):
-        raise ScreenshotError("KWin returned invalid image dimensions")
-    if not (0 < width <= 32768 and 0 < height <= 32768):
-        raise ScreenshotError("KWin returned unsafe image dimensions")
-    if stride < width * 4:
-        raise ScreenshotError("KWin returned an invalid image stride")
-    expected_size = stride * height
-    if expected_size > _KWIN_MAX_IMAGE_BYTES or len(image_bytes) != expected_size:
+def _save_kwin_image(path: Path, info: _KWinImageInfo, image_bytes: bytes) -> None:
+    info.validate()
+    if len(image_bytes) != info.size:
         raise ScreenshotError("KWin returned an invalid image size")
-    if image_format not in (4, 5, 6):
-        raise ScreenshotError(f"KWin returned unsupported QImage format {image_format}")
-
     image = Image.frombytes(
         "RGBA",
-        (width, height),
+        (info.width, info.height),
         image_bytes,
         "raw",
         "BGRA",
-        stride,
+        info.stride,
         1,
     )
     image.save(path, "PNG")
 
 
-def _capture_kwin_workspace(path: Path, timeout: float) -> None:
-    from jeepney import DBusAddress, new_method_call  # type: ignore[import-untyped]
-    from jeepney.io.blocking import (  # type: ignore[import-untyped]
-        open_dbus_connection,
-    )
-    from jeepney.low_level import MessageType  # type: ignore[import-untyped]
-
-    read_descriptor, write_descriptor = os.pipe()
+def _capture_kwin_workspace(path: Path, helper: Path, timeout: float) -> None:
+    raw_path = path.with_suffix(".kwin.raw")
+    raw_path.unlink(missing_ok=True)
     try:
-        address = DBusAddress(
-            _KWIN_OBJECT,
-            bus_name=_KWIN_SERVICE,
-            interface=_KWIN_INTERFACE,
+        result = subprocess.run(
+            [helper, raw_path, str(max(1, round(timeout * 1000)))],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 2,
         )
-        options = {
-            "include-cursor": ("b", False),
-            "native-resolution": ("b", False),
-            "hide-caller-windows": ("b", False),
-        }
-        message = new_method_call(
-            address,
-            "CaptureWorkspace",
-            "a{sv}h",
-            (options, write_descriptor),
-        )
-        with open_dbus_connection(enable_fds=True) as connection:
-            reply = connection.send_and_get_reply(message, timeout=timeout)
-        os.close(write_descriptor)
-        write_descriptor = -1
-        if reply.header.message_type is not MessageType.method_return:
-            raise ScreenshotError(f"KWin rejected the screenshot request: {reply.body}")
-        if len(reply.body) != 1 or not isinstance(reply.body[0], dict):
-            raise ScreenshotError("KWin returned invalid screenshot metadata")
-        metadata = reply.body[0]
-        stride = _variant_value(metadata, "stride")
-        height = _variant_value(metadata, "height")
-        if not isinstance(stride, int) or not isinstance(height, int):
-            raise ScreenshotError("KWin returned invalid image dimensions")
-        expected_size = stride * height
-        if not (0 < expected_size <= _KWIN_MAX_IMAGE_BYTES):
-            raise ScreenshotError("KWin returned an unsafe image size")
-        image_bytes = _read_image_bytes(read_descriptor, expected_size)
-        _save_kwin_image(path, metadata, image_bytes)
+        info = _KWinImageInfo.parse(result.stdout)
+        if raw_path.stat().st_size != info.size:
+            raise ScreenshotError("KWin helper returned an incomplete image")
+        _save_kwin_image(path, info, raw_path.read_bytes())
     finally:
-        os.close(read_descriptor)
-        if write_descriptor >= 0:
-            os.close(write_descriptor)
+        raw_path.unlink(missing_ok=True)
+
+
+def _fallback_reason(error: BaseException) -> str:
+    if isinstance(error, subprocess.CalledProcessError) and error.stderr:
+        stderr = error.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        if isinstance(stderr, str):
+            return stderr.strip().splitlines()[-1]
+    return str(error)
 
 
 def _capture_with_kwin_helper(
@@ -267,26 +228,21 @@ def _capture_with_kwin_helper(
     timeout: float,
     environment: dict[str, str],
 ) -> bool:
-    helper = _ensure_kwin_helper(environment)
-    if helper is None:
+    if not _kwin_session_available(environment):
         return False
     try:
-        subprocess.run(
-            [
-                helper,
-                Path(__file__).resolve(),
-                "--kwin-capture",
-                str(path),
-                str(timeout),
-            ],
-            check=True,
-            capture_output=True,
-            timeout=timeout + 2,
-            env=environment,
-        )
+        helper = _ensure_kwin_helper(environment)
+        if helper is None:
+            return False
+        _capture_kwin_workspace(path, helper, timeout)
         return path.exists() and path.stat().st_size > 0
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ScreenshotError, subprocess.SubprocessError, ValueError) as error:
         path.unlink(missing_ok=True)
+        print(
+            f"Rupture Companion direct KWin capture failed: "
+            f"{_fallback_reason(error)}; using Spectacle",
+            file=sys.stderr,
+        )
         return False
 
 
@@ -337,20 +293,3 @@ def capture_for_analysis() -> Iterator[Path]:
         yield path
     finally:
         path.unlink(missing_ok=True)
-
-
-def _main(arguments: list[str]) -> int:
-    if len(arguments) != 4 or arguments[1] != "--kwin-capture":
-        return 2
-    output = Path(arguments[2])
-    try:
-        timeout = float(arguments[3])
-        _capture_kwin_workspace(output, timeout)
-        return 0
-    except (OSError, ScreenshotError, ValueError):
-        output.unlink(missing_ok=True)
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(_main(sys.argv))

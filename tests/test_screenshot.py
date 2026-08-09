@@ -127,20 +127,45 @@ def test_linux_capture_prefers_kwin_helper(monkeypatch, tmp_path):
 
 def test_save_kwin_image_decodes_bgra_rows(tmp_path):
     output = tmp_path / "shot.png"
-    metadata = {
-        "type": ("s", "raw"),
-        "width": ("u", 2),
-        "height": ("u", 1),
-        "stride": ("u", 8),
-        "format": ("u", 6),
-    }
+    info = screenshot._KWinImageInfo(2, 1, 8, 6)
     raw = bytes((0, 0, 255, 255, 0, 255, 0, 255))
 
-    screenshot._save_kwin_image(output, metadata, raw)
+    screenshot._save_kwin_image(output, info, raw)
 
     with screenshot.Image.open(output) as image:
         assert image.getpixel((0, 0)) == (255, 0, 0, 255)
         assert image.getpixel((1, 0)) == (0, 255, 0, 255)
+
+
+def test_prepare_registers_direct_kwin_backend(monkeypatch, capsys):
+    environment = {
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        "XDG_CURRENT_DESKTOP": "KDE",
+    }
+    monkeypatch.setattr(screenshot, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(screenshot, "_sanitized_environment", lambda: environment)
+    monkeypatch.setattr(screenshot, "_ensure_kwin_helper", lambda env: Path("helper"))
+
+    screenshot.prepare()
+
+    assert "direct KWin capture" in capsys.readouterr().out
+
+
+def test_kwin_failure_reports_spectacle_fallback(monkeypatch, tmp_path, capsys):
+    environment = {
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        "XDG_CURRENT_DESKTOP": "KDE",
+    }
+    monkeypatch.setattr(
+        screenshot,
+        "_ensure_kwin_helper",
+        lambda env: (_ for _ in ()).throw(screenshot.ScreenshotError("denied")),
+    )
+
+    assert not screenshot._capture_with_kwin_helper(
+        tmp_path / "shot.png", 3, environment
+    )
+    assert "denied; using Spectacle" in capsys.readouterr().err
 
 
 def test_capture_for_analysis_removes_the_temporary_image(monkeypatch, tmp_path):

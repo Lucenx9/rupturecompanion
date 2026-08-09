@@ -18,6 +18,7 @@ REQUIRED_FILES = (
     "plugin_updater.py",
     "updater.py",
     "daemon-capabilities.json",
+    "kwin-screenshot-helper",
     "VERSION",
 )
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024

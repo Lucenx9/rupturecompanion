@@ -413,6 +413,7 @@ def main() -> None:
             )
         if lock is None:
             lock = acquire_lock(identity)
+        screenshot.prepare()
         if ready_protocol:
             ready.write_text(f"{identity}\n", encoding="utf-8")
         conversation = Conversation()

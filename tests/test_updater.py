@@ -29,6 +29,7 @@ def test_extract_backend_accepts_complete_release(tmp_path):
             "screenshot.py": "screenshot",
             "updater.py": "updater",
             "daemon-capabilities.json": '{"ready_protocol": 1}',
+            "kwin-screenshot-helper": "helper",
             "VERSION": "v0.1.0\n",
         },
     )
@@ -59,6 +60,7 @@ def test_extract_backend_rejects_invalid_python(tmp_path):
             "screenshot.py": "screenshot = True",
             "updater.py": "updater = True",
             "daemon-capabilities.json": '{"ready_protocol": 1}',
+            "kwin-screenshot-helper": "helper",
             "VERSION": "v0.1.0\n",
         },
     )
@@ -161,6 +163,7 @@ def test_update_backend_installs_release_and_keeps_rollback(tmp_path, monkeypatc
                 "screenshot.py": "screenshot = True",
                 "updater.py": "updater = True",
                 "daemon-capabilities.json": '{"ready_protocol": 1}',
+                "kwin-screenshot-helper": "helper",
                 "VERSION": "v0.2.0\n",
             },
         )

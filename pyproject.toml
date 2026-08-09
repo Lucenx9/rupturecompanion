@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "In-game AI companion for StarRupture"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["jeepney>=0.9,<1", "pillow>=11,<13"]
+dependencies = ["pillow>=11,<13"]
 
 [dependency-groups]
 dev = [
