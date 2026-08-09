@@ -29,11 +29,13 @@ NON_PUBLIC_DNS_SUFFIXES = (
     "onion",
     "test",
 )
+NON_DOMAIN_FILE_SUFFIXES = frozenset({"dll", "exe", "ini", "json", "log", "pak"})
 WEB_TOOLS = "Read,WebSearch"
 LOCAL_TIMEOUT_SECONDS = 120
 WEB_TIMEOUT_SECONDS = 180
 MAX_SOURCES = 3
 MAX_SOURCE_URL_CHARS = 2048
+MAX_SOURCE_LABEL_CHARS = 64
 HISTORY_TURNS = 6
 MODEL = "sonnet"
 SOURCE_BLOCK_MARKER = "__RC_SOURCES_V1__"
@@ -454,7 +456,12 @@ def _contains_control_characters(value: str) -> bool:
 
 
 def _contains_url(value: str) -> bool:
-    return "://" in value or DOMAIN_LIKE_PATTERN.search(value) is not None
+    if "://" in value:
+        return True
+    return any(
+        match.group().rsplit(".", 1)[-1].casefold() not in NON_DOMAIN_FILE_SUFFIXES
+        for match in DOMAIN_LIKE_PATTERN.finditer(value)
+    )
 
 
 def _validated_source_label(url: str) -> str | None:
@@ -493,7 +500,10 @@ def _validated_source_label(url: str) -> str | None:
     for domain, label in FRIENDLY_WEB_SOURCE_LABELS:
         if hostname == domain or hostname.endswith(f".{domain}"):
             return label
-    return hostname.removeprefix("www.")
+    label = hostname.removeprefix("www.")
+    if len(label) > MAX_SOURCE_LABEL_CHARS:
+        label = f"...{label[-(MAX_SOURCE_LABEL_CHARS - 3) :]}"
+    return label
 
 
 def _validated_sources(value: object) -> list[tuple[str, str]]:
