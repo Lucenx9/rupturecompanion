@@ -628,7 +628,7 @@ def test_structured_response_keeps_claude_sources_and_deduplicates_sites():
         sources=[
             {"url": "https://example.com/guide"},
             {"url": "https://starrupturewiki.org/StarRupture"},
-            {"url": "https://starrupturewiki.org/StarRupture"},
+            {"url": "https://starrupturewiki.org/Items"},
         ],
         web_requests=1,
     )
@@ -659,6 +659,28 @@ def test_structured_response_limits_source_pill_label_length():
     assert len(label) <= 64
     assert label.startswith("...")
     assert label.endswith(".com")
+
+
+def test_structured_response_preserves_distinct_sources_with_colliding_labels():
+    shared_suffix = f"{'a' * 50}.shared.example.com"
+    response = response_envelope(
+        "Advice",
+        web_used=True,
+        sources=[
+            {"url": f"https://x{shared_suffix}/one"},
+            {"url": f"https://y{shared_suffix}/two"},
+        ],
+        web_requests=1,
+    )
+
+    answer = ai_backend.parse_structured_response(
+        response,
+        web_tools_enabled=True,
+        source_pills_supported=True,
+    )
+
+    labels = answer.text.split("Sources:\n", 1)[1].splitlines()
+    assert len(labels) == 2
 
 
 def test_run_with_cancellation_polls_until_claude_finishes(monkeypatch, tmp_path):

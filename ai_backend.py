@@ -464,7 +464,7 @@ def _contains_url(value: str) -> bool:
     )
 
 
-def _validated_source_label(url: str) -> str | None:
+def _validated_source(url: str) -> tuple[str, str] | None:
     if (
         not url
         or len(url) > MAX_SOURCE_URL_CHARS
@@ -499,25 +499,28 @@ def _validated_source_label(url: str) -> str | None:
             return None
     for domain, label in FRIENDLY_WEB_SOURCE_LABELS:
         if hostname == domain or hostname.endswith(f".{domain}"):
-            return label
+            return label, hostname
     label = hostname.removeprefix("www.")
     if len(label) > MAX_SOURCE_LABEL_CHARS:
         label = f"...{label[-(MAX_SOURCE_LABEL_CHARS - 3) :]}"
-    return label
+    return label, hostname
 
 
 def _validated_sources(value: object) -> list[tuple[str, str]]:
     if not isinstance(value, list) or len(value) > MAX_SOURCES:
         raise AIError("invalid structured output from Claude")
     sources: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    seen_hosts: set[str] = set()
     for source in value:
         if not isinstance(source, dict) or set(source) != {"url"}:
             raise AIError("invalid structured output from Claude")
         url = source["url"]
-        label = _validated_source_label(url) if isinstance(url, str) else None
-        if label is not None and label not in seen:
-            seen.add(label)
+        validated = _validated_source(url) if isinstance(url, str) else None
+        if validated is None:
+            continue
+        label, hostname = validated
+        if hostname not in seen_hosts:
+            seen_hosts.add(hostname)
             sources.append((label, url))
     return sources
 
