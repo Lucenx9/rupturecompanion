@@ -538,6 +538,84 @@ def test_bash_installer_detects_new_loader_log_format(tmp_path):
     ).read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Bash installer is Linux-only")
+def test_bash_installer_discovers_secondary_library_and_removes_obsolete_files(
+    tmp_path,
+):
+    steam_root = tmp_path / "steam"
+    secondary_library = tmp_path / "other SSD" / "SteamLibrary"
+    game_root = secondary_library / "steamapps/common/StarRupture"
+    binary_dir = game_root / "StarRupture/Binaries/Win64"
+    plugin_dir = binary_dir / "ModLoader/Plugins"
+    log_dir = binary_dir / "ModLoader/Logs"
+    fake_bin = tmp_path / "bin"
+    (steam_root / "steamapps").mkdir(parents=True)
+    (secondary_library / "steamapps").mkdir(parents=True)
+    plugin_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    fake_bin.mkdir()
+    (steam_root / "steamapps/libraryfolders.vdf").write_text(
+        f'"libraryfolders"\n{{\n  "1"\n  {{\n    "path" "{secondary_library}"\n  }}\n}}\n',
+        encoding="utf-8",
+    )
+    (secondary_library / "steamapps/appmanifest_1631270.acf").write_text(
+        '"AppState" { "appid" "1631270" "installdir" "StarRupture" }\n',
+        encoding="utf-8",
+    )
+    (binary_dir / "StarRuptureGameSteam-Win64-Shipping.exe").write_bytes(b"")
+    (binary_dir / "dwmapi.dll").write_bytes(b"MZ")
+    (binary_dir / "ModLoader/modloader.ini").write_text(
+        "[AutoUpdate]\nEnabled=1\n", encoding="utf-8"
+    )
+    (log_dir / "ModLoader.log").write_text(
+        "loader supports [46, 60]\n", encoding="utf-8"
+    )
+    for obsolete in (
+        "RuptureCompanion-Client.dll",
+        "RuptureCompanion-Client.json",
+        "RuptureCompanion-Legacy.dll",
+        "RuptureCompanion-Legacy.json",
+    ):
+        (plugin_dir / obsolete).write_bytes(b"old")
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        "#!/usr/bin/env bash\n"
+        "while (( $# )); do\n"
+        "  if [[ $1 == -o ]]; then output=$2; shift 2; continue; fi\n"
+        "  shift\n"
+        "done\n"
+        'printf MZdownloaded > "$output"\n',
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+
+    result = subprocess.run(
+        [str(Path(__file__).parent.parent / "install-plugin.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "RC_STEAM_ROOT": str(steam_root),
+            "RC_ENABLE_AUTO_UPDATE": "0",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert str(plugin_dir) in result.stdout
+    assert (plugin_dir / "RuptureCompanion.dll").read_bytes() == b"MZdownloaded"
+    assert not any(
+        (plugin_dir / obsolete).exists()
+        for obsolete in (
+            "RuptureCompanion-Client.dll",
+            "RuptureCompanion-Client.json",
+            "RuptureCompanion-Legacy.dll",
+            "RuptureCompanion-Legacy.json",
+        )
+    )
+
+
 @pytest.mark.parametrize(
     ("installed_manifest", "installed_dll", "expected_dll", "keeps_rollback"),
     INSTALLER_RECOVERY_CASES,
@@ -640,6 +718,9 @@ def test_windows_installer_recognizes_new_loader_log_messages():
     assert "loader supports" in script
     assert "supported range" in script
     assert script.index("$InterfaceMin -le 60") < script.index("$InterfaceMin -le 47")
+    assert "$env:RC_STEAM_ROOT" in script
+    assert "RuptureCompanion-Client.dll" in script
+    assert "RuptureCompanion-Legacy.dll" in script
 
 
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell installer is Windows-only")
@@ -691,6 +772,74 @@ def test_powershell_installer_prefers_current_for_overlapping_range(tmp_path):
     assert plugin_updater.CURRENT_MANIFEST_URL in (
         plugin_dir / "RuptureCompanion.json"
     ).read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell installer is Windows-only")
+def test_powershell_installer_discovers_secondary_library_and_removes_obsolete_files(
+    tmp_path,
+):
+    steam_root = tmp_path / "steam"
+    secondary_library = tmp_path / "other SSD" / "SteamLibrary"
+    game_root = secondary_library / "steamapps/common/StarRupture"
+    binary_dir = game_root / "StarRupture/Binaries/Win64"
+    plugin_dir = binary_dir / "ModLoader/Plugins"
+    log_dir = binary_dir / "ModLoader/Logs"
+    (steam_root / "steamapps").mkdir(parents=True)
+    (secondary_library / "steamapps").mkdir(parents=True)
+    plugin_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    escaped_library = str(secondary_library).replace("\\", "\\\\")
+    (steam_root / "steamapps/libraryfolders.vdf").write_text(
+        f'"libraryfolders"\n{{\n  "1"\n  {{\n    "path" "{escaped_library}"\n  }}\n}}\n',
+        encoding="utf-8",
+    )
+    (secondary_library / "steamapps/appmanifest_1631270.acf").write_text(
+        '"AppState" { "appid" "1631270" "installdir" "StarRupture" }\n',
+        encoding="utf-8",
+    )
+    (binary_dir / "StarRuptureGameSteam-Win64-Shipping.exe").write_bytes(b"")
+    (binary_dir / "dwmapi.dll").write_bytes(b"MZ")
+    (binary_dir / "ModLoader/modloader.ini").write_text(
+        "[AutoUpdate]\nEnabled=1\n", encoding="utf-8"
+    )
+    (log_dir / "ModLoader.log").write_text(
+        "loader supports [46, 60]\n", encoding="utf-8"
+    )
+    obsolete_names = (
+        "RuptureCompanion-Client.dll",
+        "RuptureCompanion-Client.json",
+        "RuptureCompanion-Legacy.dll",
+        "RuptureCompanion-Legacy.json",
+    )
+    for obsolete in obsolete_names:
+        (plugin_dir / obsolete).write_bytes(b"old")
+    installer = Path(__file__).parent.parent / "install-plugin.ps1"
+
+    def quote(path: Path) -> str:
+        return str(path).replace("'", "''")
+
+    command = (
+        "function Invoke-WebRequest { param([switch]$UseBasicParsing, "
+        "[string]$Uri, [string]$OutFile); "
+        "[IO.File]::WriteAllBytes($OutFile, [byte[]](0x4d,0x5a,0x00)) }; "
+        f"& '{quote(installer)}'"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "RC_STEAM_ROOT": str(steam_root),
+            "RC_ENABLE_AUTO_UPDATE": "0",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert str(plugin_dir) in result.stdout
+    assert (plugin_dir / "RuptureCompanion.dll").read_bytes().startswith(b"MZ")
+    assert not any((plugin_dir / obsolete).exists() for obsolete in obsolete_names)
 
 
 @pytest.mark.parametrize(

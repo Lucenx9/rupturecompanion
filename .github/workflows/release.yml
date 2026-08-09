@@ -8,13 +8,23 @@ on:
       - "**/*.md"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: rupture-companion-release
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Select deterministic release tag
+        id: tag
+        shell: bash
+        run: echo "tag=v0.${{ github.run_number }}.0" >> "$GITHUB_OUTPUT"
+
   verify-python:
     strategy:
       fail-fast: false
@@ -22,8 +32,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
       - run: uv sync --locked --group dev
       - run: uv run pytest -q
       - run: uv run ruff check .
@@ -45,71 +55,76 @@ jobs:
           }
           if ($failed) { exit 1 }
 
-  verify-plugin:
+  build-plugins:
+    needs: prepare
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: AlienXAXS/StarRupture-Plugin-SDK
-          ref: v1.17.3
+          ref: a3f37a6638be19d0a40fdaba117b03558b20c720
           path: plugin-sdk
-      - uses: microsoft/setup-msbuild@v2
-      - name: Build current interface
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: AlienXAXS/StarRupture-Game-SDK
+          ref: 2c7d138506e42011d1ccf4ee044339c154b45b90
+          path: game-sdk
+      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+      - name: Build and package current plugin
         shell: pwsh
         run: |
+          $tag = "${{ needs.prepare.outputs.tag }}"
           msbuild RuptureCompanion.sln `
             /p:Configuration="Client Release" `
             /p:Platform=x64 `
+            /p:GameSDKRoot="${{ github.workspace }}\game-sdk" `
             /p:PluginSDKInclude="${{ github.workspace }}\plugin-sdk\include" `
+            /p:ModLoaderBuildTag="$tag" `
             /m /v:minimal
-      - name: Build legacy interface
+
+          $dll = "build\Client Release\Plugins\RuptureCompanion.dll"
+          Copy-Item $dll RuptureCompanion-Client.dll
+
+          $header = Get-Content "plugin-sdk\include\plugin_interface.h" -Raw
+          $minimum = [regex]::Match(
+            $header, '#define\s+PLUGIN_INTERFACE_VERSION_MIN\s+(\d+)'
+          ).Groups[1].Value
+          $maximum = [regex]::Match(
+            $header, '#define\s+PLUGIN_INTERFACE_VERSION_MAX\s+(\d+)'
+          ).Groups[1].Value
+          if (-not $minimum -or -not $maximum) {
+            throw "Could not read the pinned Plugin SDK interface range"
+          }
+
+          [ordered]@{
+            plugin_name = "RuptureCompanion"
+            version = $tag
+            interface_version_min = [int]$minimum
+            interface_version_max = [int]$maximum
+            download_url = "https://github.com/${{ github.repository }}/releases/download/$tag/RuptureCompanion-Client.dll"
+          } | ConvertTo-Json | Out-File RuptureCompanion-client-manifest.json -Encoding utf8NoBOM
+
+          New-Item -ItemType Directory -Force staging\Plugins | Out-Null
+          Copy-Item $dll staging\Plugins\RuptureCompanion.dll
+          [ordered]@{
+            manifest_url = "https://github.com/${{ github.repository }}/releases/latest/download/RuptureCompanion-client-manifest.json"
+          } | ConvertTo-Json | Out-File staging\Plugins\RuptureCompanion.json -Encoding utf8NoBOM
+          Compress-Archive -Path staging\* -DestinationPath "RuptureCompanion-Client-$tag.zip"
+
+      - name: Build and package legacy plugin
         shell: pwsh
         run: |
+          $tag = "${{ needs.prepare.outputs.tag }}"
           New-Item -ItemType Directory -Force legacy-sdk\include | Out-Null
           Invoke-WebRequest `
-            -Uri "https://raw.githubusercontent.com/AlienXAXS/StarRupture-ModLoader/v1.15.6/StarRupture-ModLoader-Core/plugins/plugin_interface.h" `
+            -Uri "https://raw.githubusercontent.com/AlienXAXS/StarRupture-ModLoader/b3fa2fae7b9b48f7c7bf98ceeb1ab83ef2f0f59d/StarRupture-ModLoader-Core/plugins/plugin_interface.h" `
             -OutFile legacy-sdk\include\plugin_interface.h
+
           msbuild RuptureCompanion.sln /t:Rebuild `
             /p:Configuration="Client Release" `
             /p:Platform=x64 `
-            /p:PluginSDKInclude="${{ github.workspace }}\legacy-sdk\include" `
-            /m /v:minimal
-
-  release:
-    needs: [verify-python, verify-plugin]
-    uses: AlienXAXS/StarRupture-Plugin-SDK/.github/workflows/plugin-release.yml@v1.17.3
-    with:
-      plugin_name: RuptureCompanion
-      solution_file: RuptureCompanion.sln
-      variant: Client
-      release_title: Rupture Companion
-    secrets: inherit
-
-  legacy:
-    needs: release
-    runs-on: windows-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: microsoft/setup-msbuild@v2
-      - name: Download legacy v47 interface
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force legacy-sdk\include | Out-Null
-          Invoke-WebRequest `
-            -Uri "https://raw.githubusercontent.com/AlienXAXS/StarRupture-ModLoader/v1.15.6/StarRupture-ModLoader-Core/plugins/plugin_interface.h" `
-            -OutFile legacy-sdk\include\plugin_interface.h
-      - name: Build and package legacy plugin
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tag = gh release view --json tagName --jq .tagName
-          msbuild RuptureCompanion.sln `
-            /p:Configuration="Client Release" `
-            /p:Platform=x64 `
+            /p:GameSDKRoot="${{ github.workspace }}\game-sdk" `
             /p:PluginSDKInclude="${{ github.workspace }}\legacy-sdk\include" `
             /p:ModLoaderBuildTag="$tag" `
             /m /v:minimal
@@ -124,31 +139,125 @@ jobs:
             download_url = "https://github.com/${{ github.repository }}/releases/download/$tag/RuptureCompanion-Legacy.dll"
           } | ConvertTo-Json | Out-File RuptureCompanion-legacy-manifest.json -Encoding utf8NoBOM
 
-          New-Item -ItemType Directory -Force staging\Plugins | Out-Null
           Copy-Item $dll staging\Plugins\RuptureCompanion.dll
           [ordered]@{
             manifest_url = "https://github.com/${{ github.repository }}/releases/latest/download/RuptureCompanion-legacy-manifest.json"
           } | ConvertTo-Json | Out-File staging\Plugins\RuptureCompanion.json -Encoding utf8NoBOM
           Compress-Archive -Path staging\* -DestinationPath "RuptureCompanion-Legacy-$tag.zip"
-          gh release upload $tag `
-            RuptureCompanion-Legacy.dll `
-            RuptureCompanion-legacy-manifest.json `
-            "RuptureCompanion-Legacy-$tag.zip" --clobber
 
-  backend:
-    needs: release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: Package and upload backend
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Stage plugin release assets
+        shell: pwsh
         run: |
-          tag="$(gh release view --json tagName --jq .tagName)"
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          Copy-Item RuptureCompanion-Client.dll release-assets\
+          Copy-Item RuptureCompanion-client-manifest.json release-assets\
+          Copy-Item RuptureCompanion-Client-*.zip release-assets\
+          Copy-Item RuptureCompanion-Legacy.dll release-assets\
+          Copy-Item RuptureCompanion-legacy-manifest.json release-assets\
+          Copy-Item RuptureCompanion-Legacy-*.zip release-assets\
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: plugin-release-assets
+          path: release-assets
+          if-no-files-found: error
+          retention-days: 1
+
+  build-backend:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Package backend
+        shell: bash
+        run: |
+          tag="${{ needs.prepare.outputs.tag }}"
           staging="$(mktemp -d)"
           cp ai_backend.py daemon.py daemon-capabilities.json plugin_updater.py screenshot.py updater.py pyproject.toml uv.lock "$staging/"
           printf '%s\n' "$tag" > "$staging/VERSION"
           tar -C "$staging" -czf RuptureCompanion-Backend.tar.gz .
-          gh release upload "$tag" RuptureCompanion-Backend.tar.gz --clobber
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: backend-release-assets
+          path: RuptureCompanion-Backend.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [prepare, verify-python, build-plugins, build-backend]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: plugin-release-assets
+          path: release-assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: backend-release-assets
+          path: release-assets
+      - name: Publish complete release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          expected=(
+            "RuptureCompanion-Client.dll"
+            "RuptureCompanion-client-manifest.json"
+            "RuptureCompanion-Client-$tag.zip"
+            "RuptureCompanion-Legacy.dll"
+            "RuptureCompanion-legacy-manifest.json"
+            "RuptureCompanion-Legacy-$tag.zip"
+            "RuptureCompanion-Backend.tar.gz"
+          )
+          assets=()
+          for name in "${expected[@]}"; do
+            path="release-assets/$name"
+            test -f "$path"
+            assets+=("$path")
+          done
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            target="$(
+              gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha'
+            )"
+            if [[ "$target" != "$GITHUB_SHA" ]]; then
+              echo "Release tag $tag points to $target, expected $GITHUB_SHA" >&2
+              exit 1
+            fi
+            is_draft="$(
+              gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+                --json isDraft --jq '.isDraft'
+            )"
+            if [[ "$is_draft" == "false" ]]; then
+              published_assets="$(
+                gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+                  --json assets --jq '.assets[].name'
+              )"
+              for name in "${expected[@]}"; do
+                if ! grep -Fqx "$name" <<< "$published_assets"; then
+                  echo "Published release $tag is missing $name" >&2
+                  exit 1
+                fi
+              done
+              echo "Release $tag is already complete; leaving it unchanged."
+              exit 0
+            fi
+          else
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Rupture Companion $tag" \
+              --generate-notes \
+              --draft
+          fi
+
+          gh release upload "$tag" "${assets[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          gh release edit "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --latest

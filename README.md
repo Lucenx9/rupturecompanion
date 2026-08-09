@@ -1,18 +1,27 @@
 # Rupture Companion
 
 Rupture Companion is an in-game AI chat for **StarRupture**. Press **F10**, ask
-a question in your preferred language, and the companion captures the current
-screen and returns concise advice in that same language inside the game.
+a question in your preferred language, and the companion combines a live,
+read-only game-state snapshot with the current screen to return concise advice
+in that same language inside the game.
 
 It is a port of the companion workflow from Project Zomboid to
 [AlienX's StarRupture Mod Loader](https://github.com/AlienXAXS/StarRupture-ModLoader).
-The plugin is read-only: it observes the screenshot and session type but never
-changes inventory, buildings, characters, or saves.
+The plugin is read-only: it observes player state, inventory, gems, equipment,
+skills and research progression, objectives, the current target or machine,
+environmental waves, map/base alerts, the closest replicated players, multiplayer
+session state, the screenshot, and session type. It never changes inventory,
+buildings, characters, or saves.
 
 ## Features
 
 - Native ImGui chat panel loaded by StarRupture Mod Loader
 - F10 toggle, Enter-to-send, retry, cancel, and confirmed new-chat reset
+- Live player vitals, inventory, gems, equipment, skills, corporations, unlocks,
+  available technology, objectives, target machine status, power/crafting data,
+  environmental waves, map/base alerts, up to eight closest replicated players
+  (with distance), and multiplayer session
+  state
 - Screenshot-aware answers through the logged-in Claude Code CLI
 - Automatic response-language matching for each player message
 - Six-turn conversational context and persistent `/web on` / `/web off` mode
@@ -46,8 +55,9 @@ cd rupturecompanion
 uv sync --group dev
 ```
 
-Install the plugin. The default matches the local Steam installation; pass a
-different StarRupture directory as the first argument when needed.
+Install the plugin. It searches Steam's registered libraries, including
+libraries on secondary SSDs. Pass a StarRupture directory explicitly only when
+the library is not registered with Steam.
 
 ```bash
 ./install-plugin.sh
@@ -82,8 +92,9 @@ uv sync --group dev
 powershell -ExecutionPolicy Bypass -File .\install-plugin.ps1
 ```
 
-The installer discovers the Steam library and compatible loader interface. If
-the game is in a nonstandard location, pass it explicitly:
+The installer discovers all Steam libraries registered in `libraryfolders.vdf`,
+including libraries on secondary SSDs, and selects the compatible loader
+interface. If the game is in an unregistered location, pass it explicitly:
 
 ```powershell
 .\install-plugin.ps1 -GameRoot "D:\SteamLibrary\steamapps\common\StarRupture"
@@ -92,6 +103,12 @@ the game is in a nonstandard location, pass it explicitly:
 Copy the Steam launch option printed by the installer. It uses
 `run-with-companion.cmd`, so no Proton override is needed on Windows. Launch the
 game and press **F10**.
+
+Both installers atomically replace an existing `RuptureCompanion.dll` and its
+update manifest. After a successful install they remove obsolete duplicate
+`RuptureCompanion-Client.*` and `RuptureCompanion-Legacy.*` files, while keeping
+the companion configuration, chat bridge, and other mods untouched. Close the
+game before running an installer.
 
 ## Updates
 
@@ -124,8 +141,8 @@ global setting unchanged.
 ## Web mode
 
 Web tools are available by default but used only for uncertain or current facts
-such as patches, recipes, ratios, and mods. Immediate questions about the
-screenshot stay local unless research is explicitly requested.
+such as patches, recipes, ratios, and mods. Immediate questions about the live
+game state or screenshot stay local unless research is explicitly requested.
 
 - `/web off` keeps the current chat offline.
 - `/web on` re-enables selective research.
@@ -138,15 +155,31 @@ conversation context.
 
 ## Architecture
 
-The native plugin writes a complete request to
-`StarRupture/Binaries/Win64/RuptureCompanion/question.txt`. The Linux daemon
-captures a temporary screenshot, invokes Claude in safe mode, and atomically
-publishes `answer.txt`. Both files use a sequence number, chat session ID, and
-final marker so neither side consumes partial data.
+On the Unreal game thread, the native plugin samples the local player's main
+replicated state about every 0.75 seconds and stores an immutable, size-limited
+JSON snapshot. The chat/render thread only copies that cache; it never walks
+Unreal objects directly. Missing or unavailable sections remain `null` and are
+listed explicitly, so the model is not encouraged to invent zeroes or stale
+facts. Oversized snapshots are deterministically pruned while retaining core
+vitals and equipment. The backend labels every accepted snapshot as fresh or
+stale before it reaches the model. Global factory-wide Mass ECS entities and
+server-only storage are not claimed as available; the currently targeted or
+actively interacted building exposes its relevant status, grid power, crafting
+progress, queue, and item types when the client provides them.
 
-Claude can read only the current screenshot. Bash, file editing, and game
-mutation tools are not available. Web sources are restricted by domain and
-validated before they reach the transcript. The backend then appends a versioned
+The native plugin writes a complete request to
+`StarRupture/Binaries/Win64/RuptureCompanion/question.txt`. The platform daemon
+captures a temporary screenshot, validates the versioned live-state JSON,
+invokes Claude in safe mode, and atomically publishes `answer.txt`. Both files
+use a sequence number, chat session ID, and final marker so neither side
+consumes partial data. Older plugin/backend combinations keep working and fall
+back to the screenshot when no valid live snapshot is present.
+
+Claude can read only the current screenshot and the validated read-only JSON
+included in the prompt. Snapshot strings are treated as untrusted data, not
+instructions. Bash, file editing, and game mutation tools are not available.
+Web sources are restricted by domain and validated before they reach the
+transcript. The backend then appends a versioned
 source-metadata block containing only the localized heading and approved site
 labels when the native plugin advertises support, and the plugin renders those
 labels as pills. Older plugin versions receive a readable site-name list instead,
@@ -164,10 +197,12 @@ uv run --group dev mypy
 shellcheck run-with-companion.sh install-plugin.sh
 ```
 
-GitHub Actions compiles the C++20 plugin with Visual Studio against both the
-current Plugin SDK and the legacy v47 header. A push to `main` creates a release
+GitHub Actions compiles the C++20 plugin with Visual Studio against the official
+Game SDK for StarRupture build CL121391 and both the current Plugin SDK and the
+legacy v47 header. A push to `main` creates a release
 containing both DLL channels, their updater manifests and ZIPs, and the backend
-archive.
+archive. Release builds pin both SDK repositories, and the plugin disables live
+telemetry if the executable's product version is not CL121391.
 
 The generated Plugin SDK interface header is vendored under `include/` for
 reproducible local development; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

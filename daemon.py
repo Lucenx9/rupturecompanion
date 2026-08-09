@@ -19,6 +19,12 @@ import screenshot
 
 REQUEST_PREFIX = "v1|"
 END_MARKER = "__RC_END__"
+LIVE_CONTEXT_MARKER = "__RC_LIVE_CONTEXT_V1__"
+MAX_REQUEST_BYTES = 64 * 1024
+MAX_CONTEXT_BYTES = 56 * 1024
+MAX_LIVE_CONTEXT_BYTES = ai_backend.MAX_LIVE_CONTEXT_BYTES
+MAX_SESSION_ID_BYTES = 128
+MAX_QUESTION_BYTES = 8 * 1024
 MAX_HISTORY_TURNS = ai_backend.HISTORY_TURNS
 POLL_SECONDS = 0.25
 READY_PROTOCOL_VERSION = 1
@@ -28,6 +34,7 @@ STEAM_ROOTS = (
     Path.home() / ".local/share/Steam",
     Path.home() / ".steam/steam",
 )
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class DaemonAlreadyRunning(Exception):
@@ -136,15 +143,61 @@ def acquire_lock(identity: str | None = None) -> TextIO:
     return lock
 
 
+def _validated_live_context(raw: str) -> str | None:
+    return ai_backend.validate_live_context(raw, max_input_bytes=MAX_LIVE_CONTEXT_BYTES)
+
+
+def _protocol_lines(text: str) -> list[str]:
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line.removesuffix("\r") for line in lines]
+
+
+def normalize_context(context: str) -> str:
+    lines = _protocol_lines(context)
+    marker_indexes = [
+        index for index, line in enumerate(lines) if line == LIVE_CONTEXT_MARKER
+    ]
+    if not marker_indexes:
+        return ai_backend.normalize_session_metadata(context)
+    first_marker = marker_indexes[0]
+    metadata = ai_backend.normalize_session_metadata("\n".join(lines[:first_marker]))
+    safe_metadata = metadata
+    if len(marker_indexes) != 1 or first_marker + 2 != len(lines):
+        return safe_metadata
+    live_context = _validated_live_context(lines[first_marker + 1])
+    if live_context is None:
+        return safe_metadata
+    normalized = (
+        f"{metadata}\n{LIVE_CONTEXT_MARKER}\n{live_context}"
+        if metadata
+        else f"{LIVE_CONTEXT_MARKER}\n{live_context}"
+    )
+    return (
+        normalized
+        if len(normalized.encode("utf-8")) <= MAX_CONTEXT_BYTES
+        else safe_metadata
+    )
+
+
 def parse_request(text: str) -> tuple[int, str, str, str] | None:
-    lines = text.splitlines()
+    lines = _protocol_lines(text)
     if len(lines) < 2 or lines[-1] != END_MARKER:
         return None
     fields = lines[0].split("|", 3)
     if len(fields) != 4 or fields[0] != "v1":
         return None
     _, sequence, session_id, question = fields
-    if not session_id.strip() or not question.strip():
+    session_id = session_id.strip()
+    question = question.strip()
+    if (
+        not session_id
+        or len(session_id.encode("utf-8")) > MAX_SESSION_ID_BYTES
+        or SESSION_ID_PATTERN.fullmatch(session_id) is None
+        or not question
+        or len(question.encode("utf-8")) > MAX_QUESTION_BYTES
+    ):
         return None
     try:
         parsed_sequence = int(sequence)
@@ -152,14 +205,14 @@ def parse_request(text: str) -> tuple[int, str, str, str] | None:
         return None
     if parsed_sequence < 0:
         return None
-    context = "\n".join(lines[1:-1]).strip()
-    return parsed_sequence, session_id.strip(), question.strip(), context
+    context = normalize_context("\n".join(lines[1:-1]).strip())
+    return parsed_sequence, session_id, question, context
 
 
 def _safe_answer(text: str) -> str:
     return "\n".join(
         f"[{END_MARKER}]" if line == END_MARKER else line
-        for line in text.strip().splitlines()
+        for line in _protocol_lines(text.strip())
     )
 
 
@@ -186,7 +239,7 @@ def cancellation_requested(sequence: int, session_id: str) -> bool:
         text = (bridge_dir() / "cancel.txt").read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return False
-    return text.splitlines() == [f"v1|{sequence}|{session_id}", END_MARKER]
+    return _protocol_lines(text) == [f"v1|{sequence}|{session_id}", END_MARKER]
 
 
 def handle(
@@ -237,16 +290,20 @@ def handle(
 
 def read_request() -> str:
     try:
-        return (bridge_dir() / "question.txt").read_text(encoding="utf-8")
+        with (bridge_dir() / "question.txt").open("rb") as request:
+            payload = request.read(MAX_REQUEST_BYTES + 1)
+        if len(payload) > MAX_REQUEST_BYTES:
+            return ""
+        return payload.decode("utf-8", errors="strict")
     except (OSError, UnicodeDecodeError):
         return ""
 
 
 def read_answer_identity() -> tuple[int, str] | None:
     try:
-        header = (
-            (bridge_dir() / "answer.txt").read_text(encoding="utf-8").splitlines()[0]
-        )
+        header = _protocol_lines(
+            (bridge_dir() / "answer.txt").read_text(encoding="utf-8")
+        )[0]
     except (OSError, UnicodeDecodeError, IndexError):
         return None
     fields = header.split("|")
