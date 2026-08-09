@@ -143,6 +143,13 @@ def acquire_lock(identity: str | None = None) -> TextIO:
     return lock
 
 
+def publish_lock_identity(lock: TextIO, identity: str) -> None:
+    lock.seek(0)
+    lock.truncate()
+    lock.write(f"{identity}\n")
+    lock.flush()
+
+
 def _validated_live_context(raw: str) -> str | None:
     return ai_backend.validate_live_context(raw, max_input_bytes=MAX_LIVE_CONTEXT_BYTES)
 
@@ -396,8 +403,7 @@ def main() -> None:
     identity = f"{os.getpid()}|{ready_nonce}" if ready_protocol else str(os.getpid())
     lock: TextIO | None = None
     try:
-        if ready_protocol:
-            lock = acquire_lock(identity)
+        lock = acquire_lock("starting")
         try:
             migrated = (
                 plugin_updater.sync_plugin(bridge)
@@ -411,8 +417,8 @@ def main() -> None:
                 f"Rupture Companion plugin migration skipped: {error}",
                 file=sys.stderr,
             )
-        if lock is None:
-            lock = acquire_lock(identity)
+        screenshot.prepare()
+        publish_lock_identity(lock, identity)
         if ready_protocol:
             ready.write_text(f"{identity}\n", encoding="utf-8")
         conversation = Conversation()

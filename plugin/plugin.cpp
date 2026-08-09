@@ -32,6 +32,51 @@ constexpr const char* SourcePillsContextPrefix = "Companion capabilities: ";
 constexpr const char* LiveContextMarker = "__RC_LIVE_CONTEXT_V1__";
 constexpr std::size_t MaxSources = 3;
 
+// Stable Dear ImGui indices exposed as integers by the Mod Loader ABI.
+constexpr int ImGuiColorText = 0;
+constexpr int ImGuiColorTextDisabled = 1;
+constexpr int ImGuiColorChildBackground = 3;
+constexpr int ImGuiColorBorder = 5;
+constexpr int ImGuiColorFrameBackground = 7;
+constexpr int ImGuiColorFrameBackgroundHovered = 8;
+constexpr int ImGuiColorFrameBackgroundActive = 9;
+constexpr int ImGuiColorScrollbarBackground = 14;
+constexpr int ImGuiColorScrollbarGrab = 15;
+constexpr int ImGuiColorScrollbarGrabHovered = 16;
+constexpr int ImGuiColorScrollbarGrabActive = 17;
+constexpr int ImGuiColorButton = 22;
+constexpr int ImGuiColorButtonHovered = 23;
+constexpr int ImGuiColorButtonActive = 24;
+constexpr int ImGuiColorSeparator = 28;
+
+constexpr int ImGuiStyleDisabledAlpha = 1;
+constexpr int ImGuiStyleChildRounding = 7;
+constexpr int ImGuiStyleChildBorderSize = 8;
+constexpr int ImGuiStyleFramePadding = 11;
+constexpr int ImGuiStyleFrameRounding = 12;
+constexpr int ImGuiStyleItemSpacing = 14;
+constexpr int ImGuiStyleCellPadding = 17;
+constexpr int ImGuiStyleScrollbarSize = 18;
+constexpr int ImGuiStyleScrollbarRounding = 19;
+
+constexpr int ImGuiTableBackgroundRow = 1;
+
+constexpr unsigned int PackColor(
+    const unsigned char red,
+    const unsigned char green,
+    const unsigned char blue,
+    const unsigned char alpha = 255)
+{
+    return static_cast<unsigned int>(red)
+        | (static_cast<unsigned int>(green) << 8U)
+        | (static_cast<unsigned int>(blue) << 16U)
+        | (static_cast<unsigned int>(alpha) << 24U);
+}
+
+constexpr unsigned int PlayerMessageBackground = PackColor(22, 45, 47, 236);
+constexpr unsigned int CompanionMessageBackground = PackColor(24, 34, 36, 236);
+constexpr unsigned int ErrorMessageBackground = PackColor(48, 27, 28, 240);
+
 #ifndef MODLOADER_BUILD_TAG
 #define MODLOADER_BUILD_TAG "dev"
 #endif
@@ -73,6 +118,7 @@ std::jthread g_pollThread;
 ChatState g_chat;
 char g_input[InputCapacity]{};
 bool g_enterWasDown = false;
+bool g_resetInputWidget = false;
 bool g_confirmNewChat = false;
 char g_openKey[64] = "F10";
 
@@ -132,6 +178,62 @@ std::string Trim(std::string value)
     const auto end = std::find_if(value.rbegin(), value.rend(), notSpace).base();
     return begin < end ? std::string(begin, end) : std::string{};
 }
+
+std::string DisplayText(const std::string& text)
+{
+    std::string display;
+    display.reserve(text.size());
+    for (std::size_t index = 0; index < text.size(); ++index)
+    {
+        if (index + 1 < text.size() && text[index] == '*' && text[index + 1] == '*')
+        {
+            ++index;
+            continue;
+        }
+        display.push_back(text[index]);
+    }
+    return display;
+}
+
+bool HasQuestionText(const char* text)
+{
+    if (text == nullptr)
+    {
+        return false;
+    }
+    while (*text != '\0')
+    {
+        if (std::isspace(static_cast<unsigned char>(*text)) == 0)
+        {
+            return true;
+        }
+        ++text;
+    }
+    return false;
+}
+
+class StyleStackGuard final
+{
+  public:
+    StyleStackGuard(IModLoaderImGui* ui, const int colorCount, const int variableCount)
+        : ui_(ui), colorCount_(colorCount), variableCount_(variableCount)
+    {
+    }
+
+    ~StyleStackGuard()
+    {
+        ui_->PopStyleVar(variableCount_);
+        ui_->PopStyleColor(colorCount_);
+    }
+
+    StyleStackGuard(const StyleStackGuard&) = delete;
+    StyleStackGuard& operator=(const StyleStackGuard&) = delete;
+
+  private:
+    IModLoaderImGui* ui_;
+    int colorCount_;
+    int variableCount_;
+};
 
 void AddMessageLocked(const Message::Author author, std::string text)
 {
@@ -207,6 +309,8 @@ void ResetConversation()
         RuptureCompanion::Bridge::WriteCancellation(
             canceledSequence, canceledSession, ignoredError);
     }
+    g_input[0] = '\0';
+    g_resetInputWidget = true;
 }
 
 std::string SessionContext()
@@ -400,6 +504,74 @@ void CancelWaiting()
     }
 }
 
+void RenderMessage(IModLoaderImGui* ui, const Message& message, const std::size_t messageIndex)
+{
+    const char* authorLabel = "Companion";
+    float authorRed = 0.38f;
+    float authorGreen = 0.92f;
+    float authorBlue = 0.78f;
+    unsigned int background = CompanionMessageBackground;
+    switch (message.author)
+    {
+    case Message::Author::Player:
+        authorLabel = "You";
+        authorRed = 0.50f;
+        authorGreen = 0.78f;
+        authorBlue = 1.0f;
+        background = PlayerMessageBackground;
+        break;
+    case Message::Author::Companion:
+        break;
+    case Message::Author::Error:
+        authorLabel = "Error";
+        authorRed = 1.0f;
+        authorGreen = 0.46f;
+        authorBlue = 0.43f;
+        background = ErrorMessageBackground;
+        break;
+    }
+
+    ui->PushIDInt(static_cast<int>(messageIndex));
+    ui->PushStyleVarVec2(ImGuiStyleCellPadding, 12.0f, 9.0f);
+    if (ui->BeginTable("##Message", 1, 0))
+    {
+        ui->TableNextRow(0, 0.0f);
+        ui->TableSetColumnIndex(0);
+        ui->TableSetBgColor(ImGuiTableBackgroundRow, background, -1);
+        ui->TextColored(authorRed, authorGreen, authorBlue, 1.0f, authorLabel);
+        ui->TextWrapped(message.text.c_str());
+
+        if (!message.sources.empty())
+        {
+            ui->Spacing();
+            ui->TextDisabled(message.sourcesHeading.c_str());
+            ui->PushStyleVarFloat(ImGuiStyleDisabledAlpha, 1.0f);
+            ui->PushStyleColor(ImGuiColorText, 0.38f, 0.92f, 0.78f, 1.0f);
+            ui->PushStyleColor(ImGuiColorButton, 0.08f, 0.20f, 0.20f, 1.0f);
+            ui->PushStyleColor(ImGuiColorButtonHovered, 0.08f, 0.20f, 0.20f, 1.0f);
+            ui->PushStyleColor(ImGuiColorButtonActive, 0.08f, 0.20f, 0.20f, 1.0f);
+            ui->BeginDisabled(true);
+            for (std::size_t sourceIndex = 0; sourceIndex < message.sources.size(); ++sourceIndex)
+            {
+                if (sourceIndex > 0)
+                {
+                    ui->SameLine(0.0f, 6.0f);
+                }
+                ui->PushIDInt(static_cast<int>(sourceIndex));
+                ui->SmallButton(message.sources[sourceIndex].c_str());
+                ui->PopID();
+            }
+            ui->EndDisabled();
+            ui->PopStyleColor(4);
+            ui->PopStyleVar(1);
+        }
+        ui->EndTable();
+    }
+    ui->PopStyleVar(1);
+    ui->PopID();
+    ui->Spacing();
+}
+
 void RenderPanel(IModLoaderImGui* ui)
 {
     try
@@ -426,59 +598,81 @@ void RenderPanel(IModLoaderImGui* ui)
             g_chat.scrollToBottom = false;
         }
 
-        if (unread)
+        for (Message& message : messages)
         {
-            ui->TextColored(0.45f, 0.85f, 1.0f, 1.0f, "New reply received");
+            message.text = DisplayText(message.text);
         }
+
+        const char* statusTitle = status.c_str();
+        std::string statusDetail;
+        bool statusIsError = false;
         if (waiting)
         {
             const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
                                      std::chrono::steady_clock::now() - waitingSince)
                                      .count();
-            status = "Analyzing live game state and screenshot... "
-                + std::to_string(seconds) + "s";
+            statusTitle = "Analyzing";
+            statusDetail = "Live state and screenshot - " + std::to_string(seconds) + "s";
         }
-        ui->TextDisabled(status.c_str());
+        else if (status == "Ready")
+        {
+            statusTitle = unread ? "New reply" : "Ready";
+            statusDetail = unread ? "The latest answer is ready" : "Live game context connected";
+        }
+        else
+        {
+            statusIsError = true;
+            if (canRetry)
+            {
+                statusDetail = "Retry is available";
+            }
+        }
+
+        ui->SetWindowFontScale(1.02f);
+        ui->PushStyleColor(ImGuiColorText, 0.88f, 0.92f, 0.92f, 1.0f);
+        ui->PushStyleColor(ImGuiColorTextDisabled, 0.50f, 0.58f, 0.58f, 1.0f);
+        ui->PushStyleColor(ImGuiColorChildBackground, 0.055f, 0.085f, 0.09f, 0.96f);
+        ui->PushStyleColor(ImGuiColorBorder, 0.15f, 0.27f, 0.28f, 1.0f);
+        ui->PushStyleColor(ImGuiColorFrameBackground, 0.08f, 0.14f, 0.15f, 1.0f);
+        ui->PushStyleColor(ImGuiColorFrameBackgroundHovered, 0.10f, 0.18f, 0.19f, 1.0f);
+        ui->PushStyleColor(ImGuiColorFrameBackgroundActive, 0.11f, 0.21f, 0.21f, 1.0f);
+        ui->PushStyleColor(ImGuiColorScrollbarBackground, 0.04f, 0.07f, 0.075f, 1.0f);
+        ui->PushStyleColor(ImGuiColorScrollbarGrab, 0.18f, 0.32f, 0.32f, 1.0f);
+        ui->PushStyleColor(ImGuiColorScrollbarGrabHovered, 0.24f, 0.43f, 0.42f, 1.0f);
+        ui->PushStyleColor(ImGuiColorScrollbarGrabActive, 0.30f, 0.56f, 0.53f, 1.0f);
+        ui->PushStyleColor(ImGuiColorButton, 0.10f, 0.17f, 0.18f, 1.0f);
+        ui->PushStyleColor(ImGuiColorButtonHovered, 0.14f, 0.25f, 0.25f, 1.0f);
+        ui->PushStyleColor(ImGuiColorButtonActive, 0.17f, 0.31f, 0.30f, 1.0f);
+        ui->PushStyleColor(ImGuiColorSeparator, 0.14f, 0.28f, 0.28f, 1.0f);
+        ui->PushStyleVarVec2(ImGuiStyleFramePadding, 9.0f, 6.0f);
+        ui->PushStyleVarFloat(ImGuiStyleFrameRounding, 4.0f);
+        ui->PushStyleVarVec2(ImGuiStyleItemSpacing, 8.0f, 6.0f);
+        ui->PushStyleVarFloat(ImGuiStyleChildRounding, 4.0f);
+        ui->PushStyleVarFloat(ImGuiStyleChildBorderSize, 1.0f);
+        ui->PushStyleVarFloat(ImGuiStyleScrollbarSize, 10.0f);
+        ui->PushStyleVarFloat(ImGuiStyleScrollbarRounding, 4.0f);
+        const StyleStackGuard panelStyle(ui, 15, 7);
+
+        if (statusIsError)
+        {
+            ui->TextColored(1.0f, 0.46f, 0.43f, 1.0f, statusTitle);
+        }
+        else
+        {
+            ui->TextColored(0.38f, 0.92f, 0.78f, 1.0f, statusTitle);
+        }
+        if (!statusDetail.empty())
+        {
+            ui->SameLine(0.0f, 10.0f);
+            ui->TextDisabled(statusDetail.c_str());
+        }
         ui->Separator();
 
-        if (ui->BeginChild("##Transcript", 0.0f, -82.0f, true))
+        if (ui->BeginChild("##Transcript", 0.0f, -80.0f, true))
         {
             for (std::size_t messageIndex = 0; messageIndex < messages.size(); ++messageIndex)
             {
-                const Message& message = messages[messageIndex];
-                switch (message.author)
-                {
-                case Message::Author::Player:
-                    ui->TextColored(0.42f, 0.76f, 1.0f, 1.0f, "You");
-                    break;
-                case Message::Author::Companion:
-                    ui->TextColored(0.38f, 0.92f, 0.70f, 1.0f, "Companion");
-                    break;
-                case Message::Author::Error:
-                    ui->TextColored(1.0f, 0.45f, 0.42f, 1.0f, "Error");
-                    break;
-                }
-                ui->TextWrapped(message.text.c_str());
-                if (!message.sources.empty())
-                {
-                    ui->TextDisabled(message.sourcesHeading.c_str());
-                    ui->BeginDisabled(true);
-                    for (std::size_t sourceIndex = 0; sourceIndex < message.sources.size();
-                         ++sourceIndex)
-                    {
-                        if (sourceIndex > 0)
-                        {
-                            ui->SameLine(0.0f, 6.0f);
-                        }
-                        ui->PushIDInt(static_cast<int>(messageIndex));
-                        ui->PushIDInt(static_cast<int>(sourceIndex));
-                        ui->SmallButton(message.sources[sourceIndex].c_str());
-                        ui->PopID();
-                        ui->PopID();
-                    }
-                    ui->EndDisabled();
-                }
-                ui->Spacing();
+                RenderMessage(ui, messages[messageIndex], messageIndex);
             }
             if (scrollToBottom)
             {
@@ -487,43 +681,99 @@ void RenderPanel(IModLoaderImGui* ui)
         }
         ui->EndChild();
 
+        ui->Spacing();
+        const bool resetInputWidget = g_resetInputWidget;
+        g_resetInputWidget = false;
         ui->SetNextItemWidth(-92.0f);
-        ui->InputTextWithHint(
-            "##Question", "Ask Rupture Companion...", g_input, std::size(g_input));
-        const bool inputActive = ui->IsItemActive();
+        if (resetInputWidget)
+        {
+            // InputText keeps an internal edit buffer while its ImGui ID is active.
+            // Skip that ID for one frame after clearing our buffer so the stale edit
+            // state cannot copy the submitted question back on the following frame.
+            ui->BeginDisabled(true);
+            ui->InputTextWithHint(
+                "##QuestionReset", "Ask Rupture Companion...", g_input, std::size(g_input));
+            ui->EndDisabled();
+        }
+        else
+        {
+            ui->InputTextWithHint(
+                "##Question", "Ask Rupture Companion...", g_input, std::size(g_input));
+        }
+        // Single-line InputText clears its active ID before returning on Enter,
+        // but it keeps keyboard focus. IsItemFocused therefore preserves the
+        // submission edge that IsItemActive would miss in that frame.
+        const bool inputFocused = !resetInputWidget && ui->IsItemFocused();
         const bool enterDown = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
-        const bool submitWithEnter = inputActive && enterDown && !g_enterWasDown;
+        const bool submitWithEnter = inputFocused && enterDown && !g_enterWasDown;
         g_enterWasDown = enterDown;
         ui->SameLine(0.0f, 6.0f);
-        ui->BeginDisabled(waiting || Trim(g_input).empty());
+        ui->PushStyleColor(ImGuiColorText, 0.035f, 0.10f, 0.10f, 1.0f);
+        ui->PushStyleColor(ImGuiColorButton, 0.24f, 0.86f, 0.72f, 1.0f);
+        ui->PushStyleColor(ImGuiColorButtonHovered, 0.32f, 0.94f, 0.79f, 1.0f);
+        ui->PushStyleColor(ImGuiColorButtonActive, 0.20f, 0.72f, 0.62f, 1.0f);
+        ui->BeginDisabled(waiting || !HasQuestionText(g_input));
         const bool submitWithButton = ui->ButtonSized("Send", 82.0f, 0.0f);
         ui->EndDisabled();
+        ui->PopStyleColor(4);
 
         if ((submitWithButton || submitWithEnter) && SubmitQuestion(g_input))
         {
             g_input[0] = '\0';
+            g_resetInputWidget = true;
             g_confirmNewChat = false;
         }
 
+        ui->Spacing();
+        const float actionRowStart = ui->GetCursorPosX();
+        float actionRowWidth = 0.0f;
+        float actionRowHeight = 0.0f;
+        ui->GetContentRegionAvail(&actionRowWidth, &actionRowHeight);
+        bool hasLeftAction = false;
         if (waiting)
         {
-            if (ui->SmallButton("Cancel request"))
+            hasLeftAction = true;
+            if (ui->ButtonSized("Cancel", 84.0f, 0.0f))
             {
                 CancelWaiting();
             }
-            ui->SameLine(0.0f, 8.0f);
         }
         else if (canRetry && !retryQuestion.empty())
         {
-            if (ui->SmallButton("Retry"))
+            hasLeftAction = true;
+            if (ui->ButtonSized("Retry", 76.0f, 0.0f))
             {
                 SubmitQuestion(retryQuestion);
             }
-            ui->SameLine(0.0f, 8.0f);
         }
 
         const char* newChatLabel = g_confirmNewChat ? "Confirm new chat" : "New chat";
-        if (ui->SmallButton(newChatLabel))
+        float newChatTextWidth = 0.0f;
+        float ignoredTextHeight = 0.0f;
+        ui->CalcTextSize(newChatLabel, &newChatTextWidth, &ignoredTextHeight, false, 0.0f);
+        const float newChatWidth = newChatTextWidth + 24.0f;
+        const float newChatPosition =
+            std::max(actionRowStart, actionRowStart + actionRowWidth - newChatWidth);
+        if (hasLeftAction)
+        {
+            ui->SameLine(newChatPosition, 0.0f);
+        }
+        else
+        {
+            ui->SetCursorPosX(newChatPosition);
+        }
+        if (g_confirmNewChat)
+        {
+            ui->PushStyleColor(ImGuiColorButton, 0.32f, 0.13f, 0.14f, 1.0f);
+            ui->PushStyleColor(ImGuiColorButtonHovered, 0.46f, 0.18f, 0.19f, 1.0f);
+            ui->PushStyleColor(ImGuiColorButtonActive, 0.56f, 0.20f, 0.21f, 1.0f);
+        }
+        const bool newChatClicked = ui->ButtonSized(newChatLabel, newChatWidth, 0.0f);
+        if (g_confirmNewChat)
+        {
+            ui->PopStyleColor(3);
+        }
+        if (newChatClicked)
         {
             if (g_confirmNewChat)
             {
@@ -535,6 +785,7 @@ void RenderPanel(IModLoaderImGui* ui)
                 g_confirmNewChat = true;
             }
         }
+
     }
     catch (...)
     {

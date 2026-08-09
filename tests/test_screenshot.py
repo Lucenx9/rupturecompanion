@@ -45,6 +45,7 @@ def test_linux_capture_uses_spectacle_and_sanitizes_environment(monkeypatch, tmp
     monkeypatch.setenv("QT_QPA_PLATFORM", "wayland")
     monkeypatch.setenv("LD_LIBRARY_PATH", "/game/libs")
     monkeypatch.setenv("LD_PRELOAD", "overlay.so")
+    monkeypatch.setattr(screenshot, "_capture_with_kwin_helper", lambda *args: False)
 
     def fake_run(command, **kwargs):
         observed["command"] = command
@@ -72,7 +73,7 @@ def test_linux_capture_uses_spectacle_and_sanitizes_environment(monkeypatch, tmp
 @pytest.mark.parametrize(
     ("error", "message"),
     [
-        (FileNotFoundError(), "Spectacle is not installed"),
+        (FileNotFoundError(), "No Linux screenshot backend is available"),
         (
             subprocess.CalledProcessError(1, ["spectacle"]),
             "Spectacle failed",
@@ -86,6 +87,7 @@ def test_linux_capture_reports_spectacle_errors(monkeypatch, tmp_path, error, me
         "os",
         SimpleNamespace(name="posix", environ=os.environ),
     )
+    monkeypatch.setattr(screenshot, "_capture_with_kwin_helper", lambda *args: False)
 
     def fake_run(*args, **kwargs):
         raise error
@@ -96,6 +98,79 @@ def test_linux_capture_reports_spectacle_errors(monkeypatch, tmp_path, error, me
         screenshot.capture()
 
     assert not (tmp_path / "shot.png").exists()
+
+
+def test_linux_capture_prefers_kwin_helper(monkeypatch, tmp_path):
+    monkeypatch.setattr(screenshot, "_SHOT_DIR", tmp_path)
+    monkeypatch.setattr(
+        screenshot,
+        "os",
+        SimpleNamespace(name="posix", environ=os.environ),
+    )
+
+    def fake_kwin(path, timeout, environment):
+        assert timeout == 3
+        path.write_bytes(b"png")
+        return True
+
+    monkeypatch.setattr(screenshot, "_capture_with_kwin_helper", fake_kwin)
+
+    def forbidden_spectacle(*args, **kwargs):
+        pytest.fail("Spectacle should not start when direct KWin capture succeeds")
+
+    monkeypatch.setattr(screenshot.subprocess, "run", forbidden_spectacle)
+
+    output = screenshot.capture(timeout=3)
+
+    assert output.read_bytes() == b"png"
+
+
+def test_save_kwin_image_decodes_bgra_rows(tmp_path):
+    output = tmp_path / "shot.png"
+    info = screenshot._KWinImageInfo(2, 1, 8, 6)
+    raw = bytes((0, 0, 255, 255, 0, 255, 0, 255))
+
+    screenshot._save_kwin_image(output, info, raw)
+
+    with screenshot.Image.open(output) as image:
+        assert image.getpixel((0, 0)) == (255, 0, 0, 255)
+        assert image.getpixel((1, 0)) == (0, 255, 0, 255)
+
+
+def test_prepare_registers_direct_kwin_backend(monkeypatch, capsys):
+    environment = {
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        "XDG_CURRENT_DESKTOP": "KDE",
+    }
+    monkeypatch.setattr(screenshot, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(screenshot, "_kwin_direct_ready", None)
+    monkeypatch.setattr(screenshot, "_kwin_retry_after", 0.0)
+    monkeypatch.setattr(screenshot, "_sanitized_environment", lambda: environment)
+    monkeypatch.setattr(screenshot, "_ensure_kwin_helper", lambda env: Path("helper"))
+    monkeypatch.setattr(screenshot, "_capture_kwin_workspace", lambda *args: None)
+
+    screenshot.prepare()
+
+    assert "direct KWin capture" in capsys.readouterr().out
+
+
+def test_kwin_failure_reports_spectacle_fallback(monkeypatch, tmp_path, capsys):
+    environment = {
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        "XDG_CURRENT_DESKTOP": "KDE",
+    }
+    monkeypatch.setattr(screenshot, "_kwin_direct_ready", None)
+    monkeypatch.setattr(screenshot, "_kwin_retry_after", 0.0)
+    monkeypatch.setattr(
+        screenshot,
+        "_ensure_kwin_helper",
+        lambda env: (_ for _ in ()).throw(screenshot.ScreenshotError("denied")),
+    )
+
+    assert not screenshot._capture_with_kwin_helper(
+        tmp_path / "shot.png", 3, environment
+    )
+    assert "denied; using Spectacle" in capsys.readouterr().err
 
 
 def test_capture_for_analysis_removes_the_temporary_image(monkeypatch, tmp_path):

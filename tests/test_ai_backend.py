@@ -257,7 +257,9 @@ def test_system_prompt_requires_the_players_current_language():
         ("/web off answer from the screenshot", False),
         ("/web on", True),
         ("please search online for the latest patch", True),
+        ("Vedi sul web quali consigli iniziali danno", True),
         ("answer without web", False),
+        ("rispondi senza web", False),
         ("what should I do now?", None),
     ],
 )
@@ -379,7 +381,18 @@ def test_native_project_links_the_exact_game_sdk_wrappers():
     assert 'Include="plugin\\live_context.cpp"' in project
 
 
-def test_ask_limits_claude_to_screenshot_and_approved_web(monkeypatch, tmp_path):
+def test_native_chat_input_preserves_enter_and_clears_active_edit_state():
+    plugin_source = (Path(__file__).parents[1] / "plugin/plugin.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ui->IsItemFocused()" in plugin_source
+    assert "submitWithEnter = inputFocused" in plugin_source
+    assert '"##QuestionReset"' in plugin_source
+    assert "g_resetInputWidget = true;" in plugin_source
+
+
+def test_ask_limits_claude_to_screenshot_and_web_tools(monkeypatch, tmp_path):
     screenshot = tmp_path / "shot.png"
     screenshot.write_bytes(b"png")
     observed = {}
@@ -403,8 +416,10 @@ def test_ask_limits_claude_to_screenshot_and_approved_web(monkeypatch, tmp_path)
     allowed = command[command.index("--allowedTools") + 1]
     assert f"Read({screenshot.as_posix()})" in allowed
     assert "WebSearch" in allowed
-    assert "WebFetch(domain:store.steampowered.com)" in allowed
-    assert "Bash" not in command[command.index("--tools") + 1]
+    enabled = command[command.index("--tools") + 1]
+    assert "WebFetch" not in allowed
+    assert "WebFetch" not in enabled
+    assert "Bash" not in enabled
     assert observed["kwargs"]["cwd"] == screenshot.parent
 
 
@@ -453,6 +468,46 @@ def test_ask_negotiates_source_pills_with_the_native_plugin(
     assert (ai_backend.SOURCE_BLOCK_MARKER in answer.text) is expects_source_block
     assert answer.used_web
     assert "https://" not in answer.text
+
+
+def test_ask_keeps_claudes_web_sources_for_an_italian_web_request(
+    monkeypatch, tmp_path
+):
+    screenshot = tmp_path / "shot.png"
+    screenshot.write_bytes(b"png")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=response_envelope(
+                "Le guide consigliano di costruire subito il nucleo della base.",
+                web_used=True,
+                sources=[
+                    {"url": "https://gamerant.com/starrupture-beginner-tips-guide/"}
+                ],
+                web_requests=1,
+                sources_heading="Fonti:",
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(ai_backend.subprocess, "run", fake_run)
+
+    answer = ai_backend.ask(
+        "Vedi sul web quali consigli iniziali danno",
+        str(screenshot),
+        [],
+        game_state=(
+            "Session mode: Standalone\nCompanion capabilities: source-pills-v1"
+        ),
+    )
+
+    assert answer.used_web
+    assert answer.text.endswith("Fonti:\ngamerant.com")
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -518,7 +573,32 @@ def test_structured_response_rejects_malformed_source_collections(sources):
         )
 
 
-def test_structured_response_ignores_unapproved_and_duplicate_sources():
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.com/guide",
+        "https://user@example.com/guide",
+        "https://example.com:444/guide",
+        "https://localhost/guide",
+        "https://127.0.0.1/guide",
+        "https://router.local/guide",
+        "https://service.internal/guide",
+        "https://gateway.home.arpa/guide",
+    ],
+)
+def test_structured_response_rejects_non_public_source_urls(url):
+    response = response_envelope(
+        "Advice",
+        web_used=True,
+        sources=[{"url": url}],
+        web_requests=1,
+    )
+
+    with pytest.raises(ai_backend.AIError, match="invalid structured output"):
+        ai_backend.parse_structured_response(response, web_tools_enabled=True)
+
+
+def test_structured_response_keeps_claude_sources_and_deduplicates_sites():
     response = response_envelope(
         "Advice",
         web_used=True,
@@ -532,9 +612,9 @@ def test_structured_response_ignores_unapproved_and_duplicate_sources():
 
     answer = ai_backend.parse_structured_response(response, web_tools_enabled=True)
 
+    assert answer.text.count("example.com") == 1
     assert answer.text.count("StarRupture Wiki") == 1
     assert "https://" not in answer.text
-    assert "example.com" not in answer.text
 
 
 def test_run_with_cancellation_polls_until_claude_finishes(monkeypatch, tmp_path):
