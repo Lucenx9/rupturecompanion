@@ -811,7 +811,8 @@ std::string BuildEquipment(SDK::ACrCharacterPlayerBase* player)
 
 std::vector<std::string> TechnologyNames(
     const SDK::TArray<SDK::UCrBuildingData*>& entries,
-    bool& truncated)
+    bool& truncated,
+    bool& textConverted)
 {
     std::vector<std::string> names;
     std::set<std::string> seen;
@@ -824,6 +825,8 @@ std::vector<std::string> TechnologyNames(
             continue;
         }
         std::string name = SafeText(entries[index]->BuildingName);
+        textConverted = textConverted
+            || entries[index]->BuildingName.TextData != nullptr;
         if (name.empty())
         {
             name = ObjectName(entries[index]);
@@ -838,7 +841,8 @@ std::vector<std::string> TechnologyNames(
 
 std::vector<std::string> TechnologyNames(
     const SDK::TArray<SDK::UCrItemRecipeData*>& entries,
-    bool& truncated)
+    bool& truncated,
+    bool& textConverted)
 {
     std::vector<std::string> names;
     std::set<std::string> seen;
@@ -851,6 +855,8 @@ std::vector<std::string> TechnologyNames(
             continue;
         }
         std::string name = SafeText(entries[index]->DisplayText);
+        textConverted = textConverted
+            || entries[index]->DisplayText.TextData != nullptr;
         if (name.empty())
         {
             name = ObjectName(entries[index]);
@@ -867,7 +873,8 @@ std::string BuildProgression(
     SDK::ACrGameStateBase* gameState,
     SDK::ACrPlayerControllerBase* controller,
     bool& available,
-    bool& truncated)
+    bool& truncated,
+    bool& technologyTextConverted)
 {
     if (gameState == nullptr)
     {
@@ -966,9 +973,11 @@ std::string BuildProgression(
         Add(technologyFields, "replicated_recipes_count", JsonInteger(
                 std::max(0, technology->AllRecipes.Num())));
         Add(technologyFields, "available_buildings", JsonArray(
-                TechnologyNames(technology->AvailableBuildings, truncated)));
+                TechnologyNames(technology->AvailableBuildings, truncated,
+                    technologyTextConverted)));
         Add(technologyFields, "replicated_recipes", JsonArray(
-                TechnologyNames(technology->AllRecipes, truncated)));
+                TechnologyNames(technology->AllRecipes, truncated,
+                    technologyTextConverted)));
         Add(fields, "technology", JsonObject(technologyFields));
     }
     else
@@ -1400,7 +1409,7 @@ std::string BuildUnavailableSnapshot(const std::string_view reason)
     return JsonObject(root);
 }
 
-std::string Capture(SDK::UWorld* world)
+std::string Capture(SDK::UWorld* world, bool& technologyTextConverted)
 {
     if (world == nullptr)
     {
@@ -1509,7 +1518,8 @@ std::string Capture(SDK::UWorld* world)
     bool progressionAvailable = false;
     bool progressionTruncated = false;
     const std::string progression = BuildProgression(
-        gameState, controller, progressionAvailable, progressionTruncated);
+        gameState, controller, progressionAvailable, progressionTruncated,
+        technologyTextConverted);
     if (!progressionAvailable)
     {
         AddSectionName(missing, "progression");
@@ -1682,12 +1692,11 @@ void OnEngineTick(const float)
     g_nextSampleAt = now + SampleInterval;
     try
     {
-        std::string snapshot = Capture(g_world);
-        const bool available =
-            snapshot.find("\"available\":true") != std::string::npos;
+        bool technologyTextConverted = false;
+        std::string snapshot = Capture(g_world, technologyTextConverted);
         StoreSnapshot(std::move(snapshot));
-        if (available && !g_loggedSuccessfulSample && g_self != nullptr
-            && g_self->logger != nullptr)
+        if (technologyTextConverted && !g_loggedSuccessfulSample
+            && g_self != nullptr && g_self->logger != nullptr)
         {
             g_loggedSuccessfulSample = true;
             g_self->logger->Info(
