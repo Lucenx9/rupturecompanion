@@ -143,8 +143,10 @@ def test_prepare_registers_direct_kwin_backend(monkeypatch, capsys):
         "XDG_CURRENT_DESKTOP": "KDE",
     }
     monkeypatch.setattr(screenshot, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(screenshot, "_kwin_direct_ready", None)
     monkeypatch.setattr(screenshot, "_sanitized_environment", lambda: environment)
     monkeypatch.setattr(screenshot, "_ensure_kwin_helper", lambda env: Path("helper"))
+    monkeypatch.setattr(screenshot, "_capture_kwin_workspace", lambda *args: None)
 
     screenshot.prepare()
 
@@ -156,6 +158,7 @@ def test_kwin_failure_reports_spectacle_fallback(monkeypatch, tmp_path, capsys):
         "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
         "XDG_CURRENT_DESKTOP": "KDE",
     }
+    monkeypatch.setattr(screenshot, "_kwin_direct_ready", None)
     monkeypatch.setattr(
         screenshot,
         "_ensure_kwin_helper",

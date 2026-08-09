@@ -411,9 +411,9 @@ def main() -> None:
                 f"Rupture Companion plugin migration skipped: {error}",
                 file=sys.stderr,
             )
+        screenshot.prepare()
         if lock is None:
             lock = acquire_lock(identity)
-        screenshot.prepare()
         if ready_protocol:
             ready.write_text(f"{identity}\n", encoding="utf-8")
         conversation = Conversation()
